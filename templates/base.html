@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title or 'CrowdCab | Exit Smarter. Move Faster.' }}</title>
+  <link rel="preconnect" href="https://unpkg.com">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body class="{{ body_class or '' }}">
+  <header class="site-header">
+    <a class="brand" href="{{ url_for('home') }}" aria-label="CrowdCab home">
+      <span class="brand-mark">C</span>
+      <span class="brand-copy"><strong>CrowdCab</strong><small>Event Exit Intelligence</small></span>
+    </a>
+
+    <nav class="main-nav" aria-label="Primary navigation">
+      <a class="{{ 'active' if active=='home' }}" href="{{ url_for('home') }}">Ride</a>
+      <a class="{{ 'active' if active=='map' }}" href="{{ url_for('map_page') }}">Live Map</a>
+      <a href="{{ url_for('home') }}#how">How it works</a>
+      <a href="{{ url_for('home') }}#safety">Safety</a>
+      {% if user_role in ['admin','developer'] %}<a class="{{ 'active' if active=='internal' }}" href="{{ url_for('internal_home') }}">Internal</a>{% endif %}
+    </nav>
+
+    <div class="account-nav">
+      {% if user_name %}
+        <a class="ghost-link" href="{{ url_for('my_trips') }}">My trips</a>
+        <span class="role-chip">{{ user_role }}</span>
+        <a class="auth-btn" href="{{ url_for('logout') }}">Logout</a>
+      {% else %}
+        <a class="ghost-link" href="{{ url_for('signin') }}">Sign in</a>
+        <a class="auth-btn" href="{{ url_for('signup') }}">Sign up</a>
+      {% endif %}
+    </div>
+  </header>
+
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}<div class="flash-wrap">{% for message in messages %}<div class="flash">{{ message }}</div>{% endfor %}</div>{% endif %}
+  {% endwith %}
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

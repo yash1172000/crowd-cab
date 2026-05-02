@@ -1,0 +1,14 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="simple-page trips-page">
+  <div class="page-title-row">
+    <div>
+      <p class="eyebrow">My trips</p>
+      <h1>Your CrowdCab trips.</h1>
+      <p class="muted">Confirmed pickups and GPS-style walking guidance.</p>
+    </div>
+    <a class="primary-btn" href="{{ url_for('map_page') }}">Open Live Map</a>
+  </div>
+  <div id="savedTripsList" class="trip-list enhanced-trips"></div>
+</section>
+{% endblock %}

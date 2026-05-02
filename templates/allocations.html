@@ -1,0 +1,10 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="alloc-page dispatcher-page">
+  <div class="dash-titlebar">
+    <div><p class="eyebrow">Internal dispatcher</p><h1>Cab Allocations</h1><span>Search assigned vehicles, ETA and pickup coverage.</span></div>
+    <a class="small-pill" href="{{ url_for('internal_home') }}">Control Centre</a>
+  </div>
+  <div id="allocationGrid" class="dispatcher-content"></div>
+</section>
+{% endblock %}

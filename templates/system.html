@@ -1,0 +1,10 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="system-page developer-system-page">
+  <div class="dash-titlebar">
+    <div><p class="eyebrow">Developer system</p><h1>System & Data</h1><span>Backend flow, datasets and API endpoints.</span></div>
+    <a class="small-pill" href="{{ url_for('internal_home') }}">Control Centre</a>
+  </div>
+  <div id="systemFiles" class="system-console"></div>
+</section>
+{% endblock %}

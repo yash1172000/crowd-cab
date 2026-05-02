@@ -1,0 +1,10 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="dash-page {{ meta.style }}" data-dashboard="{{ kind }}">
+  <div class="dash-titlebar">
+    <div><p class="eyebrow">Internal dashboard</p><h1>{{ meta.title }}</h1><span>{{ meta.short }}</span></div>
+    <a class="small-pill" href="{{ url_for('dashboard_hub') }}">All dashboards</a>
+  </div>
+  <div id="dashboardContent" class="dashboard-content"></div>
+</section>
+{% endblock %}

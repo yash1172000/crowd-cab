@@ -1,0 +1,19 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="dashboard-hub ops-dashboard-hub">
+  <div class="dash-titlebar">
+    <div><p class="eyebrow">Internal dashboards</p><h1>Five decision views</h1><span>Each dashboard answers one operational question.</span></div>
+    <a class="small-pill" href="{{ url_for('internal_home') }}">Control Centre</a>
+  </div>
+  <div class="dash-card-grid redesigned-dash-grid">
+    {% for key, item in dashboards.items() %}
+    <a class="dash-card {{ item.style }}" href="{{ url_for('dashboard', kind=key) }}">
+      <span class="dash-icon">{{ item.icon }}</span>
+      <b class="dash-question">{{ item.question }}</b>
+      <strong>{{ item.title }}</strong>
+      <small>{{ item.short }}</small>
+    </a>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,61 @@
+{% extends 'base.html' %}
+{% set body_class='guidance-body google-nav-body' %}
+{% block content %}
+<section class="google-guidance-page right-dock-guidance">
+  <div id="guidanceMap" class="google-guidance-map"></div>
+
+  <div class="gps-top-bar route-top-compact">
+    <a href="{{ url_for('my_trips') }}" class="gps-back" aria-label="Back to trips">←</a>
+    <div>
+      <small>Walking to pickup</small>
+      <strong id="gpsPickupTitle">Loading pickup...</strong>
+    </div>
+    <span id="gpsTopEta">—</span>
+  </div>
+
+  <div class="gps-current-step route-step-float">
+    <div class="turn-icon">↗</div>
+    <div>
+      <small>Next direction</small>
+      <strong id="gpsCurrentInstruction">Preparing route...</strong>
+      <span id="gpsCurrentDistance">—</span>
+    </div>
+  </div>
+
+  <aside class="gps-route-dock" aria-label="Route guidance">
+    <div class="route-dock-header">
+      <div class="route-icon">⌁</div>
+      <div>
+        <h2>Route guidance</h2>
+        <p>Follow these steps to your pickup.</p>
+      </div>
+    </div>
+
+    <section class="dock-pickup-summary">
+      <div class="pickup-title-block">
+        <small>Pickup point</small>
+        <strong id="gpsPickupName">—</strong>
+        <span id="gpsCrowdLevel">—</span>
+      </div>
+      <div class="dock-metrics">
+        <div><strong id="gpsWalkTime">—</strong><span>Walk</span></div>
+        <div><strong id="gpsDistance">—</strong><span>Distance</span></div>
+        <div><strong id="gpsCabEta">—</strong><span>Cab ETA</span></div>
+      </div>
+    </section>
+
+    <ol id="gpsSteps" class="gps-steps dock-steps"></ol>
+
+    <div class="dock-actions">
+      <button id="startGuidanceBtn" class="gps-start-btn">Next step</button>
+      <a href="{{ url_for('map_page') }}" class="gps-change-btn">Change</a>
+    </div>
+
+    <div class="dock-note">
+      <span>ⓘ</span>
+      <p>Live traffic and crowd conditions may affect walk time.</p>
+    </div>
+    <div class="dock-updated">↻ Last updated just now</div>
+  </aside>
+</section>
+{% endblock %}

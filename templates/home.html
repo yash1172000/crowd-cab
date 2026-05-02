@@ -1,0 +1,92 @@
+{% extends 'base.html' %}
+{% set body_class='premium-home product-home' %}
+{% block content %}
+<section class="product-hero">
+  <div class="hero-orbit one"></div>
+  <div class="hero-orbit two"></div>
+
+  <div class="product-copy">
+    <div class="event-chip"><span class="pulse-dot"></span> Suncorp Stadium · Event exit mode</div>
+    <h1>Exit smarter after every event.</h1>
+    <p class="hero-line refined">Live pickup zones, cab ETA and safer walking guidance around Suncorp Stadium.</p>
+
+    <form class="premium-ride-card" action="{{ url_for('map_page') }}">
+      <div class="ride-card-head">
+        <div>
+          <small>Plan your exit</small>
+          <strong>Where are you heading?</strong>
+        </div>
+        <span>Live</span>
+      </div>
+
+      <div class="route-input locked">
+        <i></i>
+        <div><small>Pickup</small><b>Suncorp Stadium</b></div>
+      </div>
+      <div class="route-input destination-input">
+        <i></i>
+        <div><small>Destination</small><input placeholder="Enter suburb or address" aria-label="Destination"></div>
+      </div>
+
+      <button class="primary-btn large" type="submit">Show my best pickup</button>
+      <div class="ride-card-foot">
+        <span>Best zone</span><span>Fastest route</span><span>Lower crowd</span>
+      </div>
+    </form>
+  </div>
+
+  <div class="product-visual">
+    <div class="map-showcase-shell">
+      <div class="showcase-topbar">
+        <span>Live pickup intelligence</span>
+        <b id="homeLiveStatus">Balanced flow</b>
+      </div>
+      <div id="homePreviewMap" class="home-map-preview showcase-map"></div>
+      <div class="route-ribbon">
+        <div><small>Recommended pickup</small><strong id="homeBestZone">Loading...</strong></div>
+        <span><b id="homeBestWalk">-- min</b> walk</span>
+        <span><b id="homeBestEta">-- min</b> ETA</span>
+      </div>
+      <div class="map-side-mini">
+        <span class="mini-dot green"></span><strong>Calmer exit</strong><small>Updated from live demand</small>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="proof-strip" aria-label="CrowdCab product highlights">
+  <article><small>01</small><strong>Pickup clarity</strong><span>Know exactly where to walk.</span></article>
+  <article><small>02</small><strong>Cab visibility</strong><span>Compare ETA before moving.</span></article>
+  <article><small>03</small><strong>Crowd control</strong><span>Avoid pressure points.</span></article>
+</section>
+
+<section id="how" class="cinematic-section journey-section">
+  <div class="section-heading-row">
+    <div>
+      <p class="eyebrow">How it works</p>
+      <h2>Three decisions. One clean exit.</h2>
+    </div>
+    <a class="secondary-btn" href="{{ url_for('map_page') }}">Open Live Map</a>
+  </div>
+  <div class="journey-flow">
+    <article><b>1</b><strong>Enter destination</strong><span>Start from Suncorp.</span></article>
+    <i></i>
+    <article><b>2</b><strong>Choose pickup</strong><span>Best, fastest or calmer.</span></article>
+    <i></i>
+    <article><b>3</b><strong>Follow route</strong><span>Walk. Meet. Ride.</span></article>
+  </div>
+</section>
+
+<section id="safety" class="cinematic-section trust-section">
+  <div class="trust-copy">
+    <p class="eyebrow">Safety</p>
+    <h2>Built for crowded exits, not quiet streets.</h2>
+    <p>Recommendations balance walking distance, crowd pressure, cab supply and accessibility support.</p>
+  </div>
+  <div class="trust-grid">
+    <article><span class="safe-dot green"></span><strong>Calmer zones</strong><small>Less crowd pressure</small></article>
+    <article><span class="safe-dot amber"></span><strong>Fast pickups</strong><small>Short cab ETA</small></article>
+    <article><span class="safe-dot blue"></span><strong>Accessible support</strong><small>Priority visibility</small></article>
+  </div>
+</section>
+{% endblock %}

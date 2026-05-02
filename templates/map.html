@@ -1,0 +1,66 @@
+{% extends 'base.html' %}
+{% set body_class='map-product-full' %}
+{% block content %}
+<section class="live-product-page upgraded-map-page">
+  <div id="liveMap" class="full-live-map"></div>
+
+  <div class="map-search-card trip-planner-card">
+    <div class="mini-brand"><span class="brand-mark small">C</span><strong>Plan your ride</strong></div>
+    <p class="planner-copy">Tell CrowdCab where you are heading. We will match the pickup zone.</p>
+
+    <div class="trip-flow-mini" aria-label="Trip planning steps">
+      <span class="active">1 Plan</span>
+      <span>2 Choose</span>
+      <span>3 Ride</span>
+    </div>
+
+    <label class="trip-input-block">
+      <small>Pickup</small>
+      <div class="trip-field locked"><i></i><b>Suncorp Stadium</b></div>
+    </label>
+
+    <label class="trip-input-block">
+      <small>Destination</small>
+      <div class="trip-field"><i></i><input id="destinationInput" placeholder="Enter suburb or address"></div>
+    </label>
+
+    <div class="event-mode-card">
+      <small>Event mode</small>
+      <strong>Post-event exit flow</strong>
+      <span>Short walks and calmer pickup zones first.</span>
+    </div>
+
+    <button class="primary-btn" id="recenterMap">Find my pickup</button>
+
+    <div id="tripPlannerSummary" class="trip-summary-card hidden">
+      <small>Your exit plan</small>
+      <strong>Pickup loading...</strong>
+      <span></span>
+    </div>
+  </div>
+
+  <aside class="floating-recommendations pickup-choice-panel">
+    <div class="panel-head">
+      <p class="eyebrow">Live pickup choices</p>
+      <h2>Choose Pickup</h2>
+      <p>Compare nearby zones and tap one to update the map.</p>
+    </div>
+    <div class="smart-tabs four-tabs" role="tablist">
+      <button class="tab-btn active" data-mode="best">Best</button>
+      <button class="tab-btn" data-mode="fastest">Fastest</button>
+      <button class="tab-btn" data-mode="quiet">Less crowded</button>
+      <button class="tab-btn" data-mode="accessible">Accessible</button>
+    </div>
+    <div id="selectedStrip" class="selected-pickup-card"><strong>Loading pickup...</strong><span></span></div>
+    <div id="recommendationList" class="recommendation-list premium-list pickup-options-list"></div>
+  </aside>
+
+  <div class="map-legend-card user-map-legend">
+    <span><i class="legend stadium"></i>Stadium</span>
+    <span><i class="legend easy"></i>Less crowded</span>
+    <span><i class="legend medium"></i>Moderate</span>
+    <span><i class="legend busy"></i>Busy</span>
+    <span><i class="legend cab"></i>Cab nearby</span>
+  </div>
+</section>
+{% endblock %}

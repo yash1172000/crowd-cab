@@ -1,0 +1,24 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="ops-home">
+  <div class="ops-hero-panel">
+    <div>
+      <p class="eyebrow">Admin / Developer</p>
+      <h1>Operations Control Centre</h1>
+      <p class="ops-sub">Monitor demand, cab supply, datasets and APIs without exposing internal tools to riders.</p>
+    </div>
+    <div class="ops-health-card">
+      <span class="health-dot"></span>
+      <strong>System running</strong>
+      <small>CSV to Flask API to Map UI</small>
+    </div>
+  </div>
+
+  <div class="ops-grid">
+    <a href="{{ url_for('dashboard_hub') }}" class="ops-card large"><span class="ops-icon">📊</span><strong>Operations Dashboards</strong><small>Five focused views for demand, congestion, fleet and roads.</small></a>
+    <a href="{{ url_for('allocations') }}" class="ops-card"><span class="ops-icon">🚕</span><strong>Cab Allocations</strong><small>Dispatcher-style view of vehicles, ETA and status.</small></a>
+    <a href="{{ url_for('map_page') }}" class="ops-card"><span class="ops-icon">🗺️</span><strong>Live Product Map</strong><small>Customer-facing pickup selection experience.</small></a>
+    <a href="{{ url_for('system') }}" class="ops-card"><span class="ops-icon">⚙️</span><strong>System & Data</strong><small>Dataset files, API endpoints and backend flow.</small></a>
+  </div>
+</section>
+{% endblock %}
