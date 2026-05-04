@@ -2,16 +2,28 @@
 {% set body_class='map-product-full' %}
 {% block content %}
 <section class="live-product-page upgraded-map-page">
-  <div id="liveMap" class="full-live-map"></div>
+  <div class="live-map-frame">
+    <div id="liveMap" class="full-live-map"></div>
+    <div class="map-legend-card user-map-legend">
+      <span><i class="legend stadium"></i>Stadium</span>
+      <span><i class="legend easy"></i>Less crowded</span>
+      <span><i class="legend medium"></i>Moderate</span>
+      <span><i class="legend busy"></i>Busy</span>
+      <span><i class="legend cab"></i>Cab nearby</span>
+      <span><i class="legend traffic-red"></i>Crash/closure</span>
+      <span><i class="legend traffic-orange"></i>Congestion/works</span>
+      <span><i class="legend traffic-yellow"></i>Hazard/event</span>
+    </div>
+  </div>
 
   <div class="map-search-card trip-planner-card">
     <div class="mini-brand"><span class="brand-mark small">C</span><strong>Plan your ride</strong></div>
     <p class="planner-copy">Tell CrowdCab where you are heading. We will match the pickup zone.</p>
 
     <div class="trip-flow-mini" aria-label="Trip planning steps">
-      <span class="active">1 Plan</span>
-      <span>2 Choose</span>
-      <span>3 Ride</span>
+      <button type="button" class="active" data-step="plan">1 Plan</button>
+      <button type="button" data-step="choose">2 Choose</button>
+      <button type="button" data-step="ride">3 Ride</button>
     </div>
 
     <label class="trip-input-block">
@@ -54,13 +66,5 @@
     <div id="selectedStrip" class="selected-pickup-card"><strong>Loading pickup...</strong><span></span></div>
     <div id="recommendationList" class="recommendation-list premium-list pickup-options-list"></div>
   </aside>
-
-  <div class="map-legend-card user-map-legend">
-    <span><i class="legend stadium"></i>Stadium</span>
-    <span><i class="legend easy"></i>Less crowded</span>
-    <span><i class="legend medium"></i>Moderate</span>
-    <span><i class="legend busy"></i>Busy</span>
-    <span><i class="legend cab"></i>Cab nearby</span>
-  </div>
 </section>
 {% endblock %}

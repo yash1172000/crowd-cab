@@ -1,49 +1,137 @@
-### Quick context — what this repo is
+### Project scope
 
-CrowdCab is a small Flask demo delivering a customer-facing event exit product and an internal dashboard for admins/developers. The UI uses server-side Jinja templates in `templates/` and static assets in `static/`. CSV files in `data/` are the authoritative dataset the app reads at runtime.
+CrowdCab is a pickup guidance system for crowded event exits. It is not a full cab booking, dispatch, payment, or ride-hailing platform.
+
+Current MVP focus:
+- Location: Suncorp Stadium only.
+- Event context: large post-event crowds, with future relevance to Brisbane Olympics 2032.
+- User goal: answer "Where should I walk to get a cab more easily?"
+- Core product: recommend nearby cab pickup spots and guide the user to the selected spot.
+
+The app should help users compare pickup points by:
+- walking distance
+- congestion level
+- safety
+- accessibility and accessible vehicle suitability
+- driver/cab access practicality
+
+Avoid building these until the pickup guidance MVP is strong:
+- full Uber-style booking system
+- real driver dispatch
+- payment
+- cab company integration
+- complex user accounts
+- multi-city support
+- Olympics-wide coverage
+
+### Architecture snapshot
+
+CrowdCab is a small Flask app with server-side Jinja templates and plain JavaScript.
 
 Key files:
-- `app.py` — single-file Flask app: routes, helpers, demo users, API endpoints and CSV readers.
-- `templates/` — Jinja2 templates for public pages (`home.html`, `map.html`) and internal pages (`internal.html`, `dashboard.html`, `allocations.html`, `system.html`).
-- `static/js/app.js` and `static/css/styles.css` — client-side map rendering and styles.
-- `data/*.csv` — datasets used by the app (bookings, allocations, pickup summaries, congestion, road network, companies).
+- `app.py` - Flask routes, auth, SQLite/CSV data providers, recommendation helpers, API payloads.
+- `templates/` - Jinja pages for the public product and internal tools.
+- `static/js/main.js` - shared frontend helpers.
+- `static/js/map.js` - live map, pickup markers, pickup option rendering.
+- `static/js/booking.js` - selected pickup confirmation and `POST /api/bookings`.
+- `static/js/my_trips.js` - saved trip rendering from `/api/my-trips`.
+- `static/js/dashboard.js` - internal dashboard, allocation, and system views.
+- `static/js/guidance.js` - GPS-style walking guidance to the selected pickup point.
+- `static/css/styles.css` - visual design.
+- `data/crowdcab.sqlite` - local operational database for bookings and allocations.
+- `data/*.csv` - seed/reference data for static or periodically refreshed layers.
 
-Run locally:
-- Install dependencies: `pip install -r requirements.txt`.
-- Start: `python app.py` (app runs on http://127.0.0.1:5000 by default). `Procfile` shows `web: python app.py` for Heroku-style deploys.
+### Data direction
 
-Why this layout matters for code suggestions
-- The app is intentionally single-file and data-driven. Most business logic lives in `app.py` (helpers like `pickup_recommendations`, `dashboard_payload`, CSV readers). Code completion should prefer small, focused edits in `app.py` rather than adding multi-file architectures.
-- Templates assume context variables injected by `app.context_processor` and route handlers (see `inject_user()` and route functions). When changing template variables, update both the route and the template.
-- Data is read from CSVs at request time using `read_csv`. Performance-sensitive changes should consider caching or precomputing instead of frequent file reads.
+The project is moving from static CSV data toward live-ready providers.
 
-Patterns and conventions to follow
-- Role gating: use `internal_required` decorator for any internal/admin routes (see how it checks `session['role']`). Mirror that pattern for new protected endpoints.
-- CSV access: use `read_csv(name, limit=None)` for reading datasets. This function returns a list of dict rows and handles missing files gracefully (returns empty list).
-- Numeric parsing: prefer `num(value, default)` helper to parse floats safely and avoid NaN/Inf issues used across helpers.
-- Geospatial bounds: helper functions filter coordinates to a Brisbane/Suncorp Stadium bounding box (`-28 < lat < -27` and `152 < lng < 154`). Keep this check when adding new marker logic.
-- Dashboard payloads: `dashboard_payload(kind)` returns a JSON-serializable dict for the internal UI. Add new views by updating `DASHBOARDS` and returning a matching shape in `dashboard_payload`.
+Current state:
+- `bookings` and `cab_allocations` are SQLite operational tables seeded from CSV.
+- pickup and cab company summaries are derived from live operational rows.
+- road, congestion, and candidate pickup point datasets are still local reference CSVs.
 
-API surface
-- Public: `/api/map-feed`, `/api/summary` — used by the public map and recommendations.
-- Internal (role-gated): `/api/dashboard/<kind>`, `/api/allocations`, `/api/system` — used by internal UI pages.
+Future real-time upgrade:
+- pull live traffic/event data
+- re-rank pickup points dynamically
+- allow pickup recommendation changes as traffic and crowd conditions change
 
-Examples (concrete edits)
-- To add a new dashboard `ridership`: add an entry in `DASHBOARDS` and handle `if kind == 'ridership':` inside `dashboard_payload` returning `kpis`, `bar`, `donut`, and `table` keys.
-- To expose a filtered CSV endpoint: add a new route that calls `read_csv('bookings.csv')`, filters rows (e.g., by `booking_channel`) and returns `jsonify({'rows': filtered})`.
+Do not jump to external traffic APIs before the local recommendation engine is clear and working.
 
-Developer workflows and debugging tips
-- Demo logins are defined in `DEMO_USERS` with clear credentials shown in `README.md` — use these to access internal pages.
-- To debug templates, render smaller contexts from a temp route or use `print()`/`app.logger.debug()` in `app.py`. The app runs with `debug=True` when started with `python app.py`.
-- When editing CSV columns, note `api_system()` lists columns for each CSV — use that endpoint to inspect current column names at runtime: `/api/system` (requires internal access).
+### Recommendation engine priority
 
-Safety & production notes (discoverable facts)
-- The secret `app.secret_key` is hard-coded for demo; do not rely on it for production. The app does not use a database — CSV files are the source of truth.
+The next important feature is the pickup recommendation engine.
 
-If you need more context
-- Look at `static/js/app.js` for how the frontend consumes `/api/map-feed` and dashboard APIs (this will show expected JSON shapes and keys).
-- Inspect `templates/dashboard.html` and `templates/dashboard_hub.html` for the fields expected from `dashboard_payload(kind)`.
+Create and maintain a scoring system similar to:
 
-If something isn't discoverable here (CI, custom deploy steps, caching, external APIs), ask the maintainer for the missing detail and include reproduction commands and any environment variables.
+```text
+pickup_score =
+  walking_score
+  + congestion_score
+  + safety_score
+  + accessibility_score
+  + driver_access_score
+```
 
-End of instructions — ask me to iterate if anything here is unclear or missing specific workflows.
+The API should return:
+- best pickup point
+- reason why it was chosen
+- alternative pickup options
+- walking time
+- congestion level
+- safety/accessibility notes
+
+This becomes the brain of the system. Frontend features should support this decision model instead of inventing separate ranking logic.
+
+### Routes and API surface
+
+Public:
+- `/`
+- `/map`
+- `/guidance`
+- `/my-trips`
+- `/api/map-feed`
+- `/api/summary`
+- `/api/bookings`
+- `/api/my-trips`
+
+Internal role-gated:
+- `/internal`
+- `/internal/dashboard`
+- `/internal/dashboard/<kind>`
+- `/internal/allocations`
+- `/internal/system`
+- `/api/dashboard/<kind>`
+- `/api/allocations`
+- `/api/system`
+
+### Coding conventions
+
+- Keep the app plain Flask, Jinja, SQLite, and plain JavaScript.
+- Do not introduce React or a new frontend framework.
+- Prefer small, focused edits that preserve the existing page structure and CSS.
+- Keep frontend files feature-based; do not rebuild `static/js/app.js`.
+- Use provider functions in `app.py` instead of reading operational datasets directly.
+- Use `num(value, default)` for safe numeric parsing.
+- Keep Suncorp/Brisbane coordinate bounds when adding map markers.
+- Internal routes must use `internal_required`.
+
+### Run locally
+
+```bash
+pip install -r requirements.txt
+python app.py
+```
+
+Open:
+
+```text
+http://127.0.0.1:5000
+```
+
+Demo logins:
+
+```text
+Customer: customer@crowdcab.com / customer123
+Admin: admin@crowdcab.com / admin123
+Developer: dev@crowdcab.com / dev123
+```

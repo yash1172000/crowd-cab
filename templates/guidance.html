@@ -14,7 +14,7 @@
   </div>
 
   <div class="gps-current-step route-step-float">
-    <div class="turn-icon">↗</div>
+    <div class="turn-icon person-turn-icon" aria-hidden="true">🚶</div>
     <div>
       <small>Next direction</small>
       <strong id="gpsCurrentInstruction">Preparing route...</strong>
@@ -43,6 +43,8 @@
         <div><strong id="gpsCabEta">—</strong><span>Cab ETA</span></div>
       </div>
     </section>
+
+    <section id="pickupRecommendationPanel" class="pickup-recommendation-panel"></section>
 
     <ol id="gpsSteps" class="gps-steps dock-steps"></ol>
 

@@ -1,13 +1,29 @@
-from flask import Flask, render_template, jsonify, request, redirect, url_for, session, flash
-import csv, os, math, json
+from flask import Flask, render_template, jsonify, request, redirect, url_for, session, flash, send_from_directory
+import csv, os, math, json, sqlite3
 from collections import Counter, defaultdict
+from datetime import datetime
 from functools import wraps
+from uuid import uuid4
+from recommendation_engine import DEFAULT_MAX_WALK_KM, WEIGHTS, recommend_pickups, score_selected_pickup
+from realtime_traffic import realtime_status
 
 app = Flask(__name__)
 app.secret_key = 'crowdcab-demo-secret-change-for-production'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
+DB_PATH = os.path.join(DATA_DIR, 'crowdcab.sqlite')
 STADIUM = {'name':'Suncorp Stadium', 'lat':-27.4648, 'lng':153.0095}
+
+BOOKING_EXTRA_COLUMNS = {
+    'created_by_email': 'TEXT',
+    'destination': 'TEXT',
+    'confirmed_pickup_label': 'TEXT',
+    'confirmed_walk_min': 'TEXT',
+    'confirmed_eta_min': 'TEXT',
+    'confirmed_crowd': 'TEXT',
+    'confirmed_at': 'TEXT',
+    'booking_status': 'TEXT',
+}
 
 DEMO_USERS = {
     'customer@crowdcab.com': {'name': 'Demo Customer', 'password': 'customer123', 'role': 'customer'},
@@ -49,6 +65,111 @@ def read_csv(name, limit=None):
                 break
     return rows
 
+def db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def quote_identifier(name):
+    return '"' + name.replace('"', '""') + '"'
+
+def seed_table_from_csv(table_name, csv_name, primary_key=None):
+    rows = read_csv(csv_name)
+    if not rows:
+        return
+
+    columns = list(rows[0].keys())
+    column_defs = []
+    for column in columns:
+        definition = f'{quote_identifier(column)} TEXT'
+        if column == primary_key:
+            definition += ' PRIMARY KEY'
+        column_defs.append(definition)
+
+    with db_connection() as conn:
+        conn.execute(f'CREATE TABLE IF NOT EXISTS {quote_identifier(table_name)} ({", ".join(column_defs)})')
+        existing = conn.execute(f'SELECT COUNT(*) FROM {quote_identifier(table_name)}').fetchone()[0]
+        if existing:
+            return
+
+        placeholders = ', '.join(['?'] * len(columns))
+        quoted_columns = ', '.join(quote_identifier(c) for c in columns)
+        conn.executemany(
+            f'INSERT INTO {quote_identifier(table_name)} ({quoted_columns}) VALUES ({placeholders})',
+            [[row.get(column, '') for column in columns] for row in rows]
+        )
+
+def ensure_table_columns(table_name, columns):
+    with db_connection() as conn:
+        existing = {r['name'] for r in conn.execute(f'PRAGMA table_info({quote_identifier(table_name)})').fetchall()}
+        for column, column_type in columns.items():
+            if column not in existing:
+                conn.execute(
+                    f'ALTER TABLE {quote_identifier(table_name)} '
+                    f'ADD COLUMN {quote_identifier(column)} {column_type}'
+                )
+
+def ensure_operational_tables():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    seed_table_from_csv('bookings', 'bookings.csv', 'booking_id')
+    seed_table_from_csv('cab_allocations', 'cab_allocations.csv', 'booking_id')
+    ensure_table_columns('bookings', BOOKING_EXTRA_COLUMNS)
+
+def read_table(table_name, limit=None):
+    ensure_operational_tables()
+    sql = f'SELECT * FROM {quote_identifier(table_name)}'
+    params = []
+    if limit:
+        sql += ' LIMIT ?'
+        params.append(limit)
+    with db_connection() as conn:
+        return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+def insert_booking(row):
+    ensure_operational_tables()
+    with db_connection() as conn:
+        columns = [r['name'] for r in conn.execute('PRAGMA table_info(bookings)').fetchall()]
+        insert_columns = [c for c in columns if c in row]
+        quoted_columns = ', '.join(quote_identifier(c) for c in insert_columns)
+        placeholders = ', '.join(['?'] * len(insert_columns))
+        values = [row.get(c, '') for c in insert_columns]
+        conn.execute(
+            f'INSERT INTO bookings ({quoted_columns}) VALUES ({placeholders})',
+            values
+        )
+
+def get_customer_bookings(email, limit=20):
+    ensure_operational_tables()
+    with db_connection() as conn:
+        rows = conn.execute(
+            '''
+            SELECT *
+            FROM bookings
+            WHERE created_by_email = ?
+            ORDER BY confirmed_at DESC, pickup_datetime DESC
+            LIMIT ?
+            ''',
+            (email, limit)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+# ---------- Data providers ----------
+# These functions are the swap point for moving from CSV files to live APIs or a database.
+def get_bookings(limit=None):
+    return read_table('bookings', limit)
+
+def get_allocations(limit=None):
+    return read_table('cab_allocations', limit)
+
+def get_candidate_pickup_points(limit=None):
+    return read_csv('candidate_pickup_points.csv', limit)
+
+def get_congestion_points(limit=None):
+    return read_csv('congestion_points.csv', limit)
+
+def get_road_network_points(limit=None):
+    return read_csv('road_network_points.csv', limit)
+
 def num(v, default=0):
     try:
         if v is None or v == '':
@@ -71,6 +192,81 @@ def crowd_band(bookings, eta):
     if bookings >= 35 or eta >= 6: return 'medium'
     return 'easy'
 
+def truthy(v):
+    return str(v or '').strip().lower() in ['true', 'yes', '1']
+
+def average(values, default=0):
+    vals = [num(v, None) for v in values]
+    vals = [v for v in vals if v is not None]
+    return sum(vals) / len(vals) if vals else default
+
+def pickup_point_summary_rows(bookings=None, allocations=None):
+    bookings = bookings if bookings is not None else get_bookings()
+    allocations = allocations if allocations is not None else get_allocations()
+    grouped = defaultdict(lambda: {
+        'bookings': [],
+        'people': [],
+        'distance': [],
+        'eta': [],
+        'accessible': 0,
+        'kids': 0,
+    })
+
+    for booking in bookings:
+        zone = booking.get('pickup_location_name') or 'Unknown'
+        grouped[zone]['bookings'].append(booking)
+        grouped[zone]['people'].append(booking.get('number_of_people'))
+        if truthy(booking.get('accessible_vehicle_required')):
+            grouped[zone]['accessible'] += 1
+        if truthy(booking.get('kids_under_5')) or num(booking.get('count_kids_under_5')) > 0:
+            grouped[zone]['kids'] += 1
+
+    for allocation in allocations:
+        zone = allocation.get('pickup_location_name') or 'Unknown'
+        grouped[zone]['distance'].append(allocation.get('distance_to_pickup_km'))
+        grouped[zone]['eta'].append(allocation.get('estimated_arrival_to_pickup_min'))
+
+    rows = []
+    for zone, data in grouped.items():
+        rows.append({
+            'pickup_location_name': zone,
+            'total_bookings': len(data['bookings']),
+            'avg_people_per_booking': round(average(data['people']), 2),
+            'avg_distance_to_pickup_km': round(average(data['distance']), 2),
+            'avg_eta_min': round(average(data['eta'], 5), 2),
+            'accessible_bookings': data['accessible'],
+            'bookings_with_kids': data['kids'],
+        })
+    rows.sort(key=lambda r: (-r['total_bookings'], r['pickup_location_name']))
+    return rows
+
+def cab_company_summary_rows(bookings=None, allocations=None):
+    bookings = bookings if bookings is not None else get_bookings()
+    allocations = allocations if allocations is not None else get_allocations()
+    grouped = defaultdict(lambda: {'bookings': 0, 'eta': [], 'distance': [], 'people': []})
+
+    for booking in bookings:
+        company = booking.get('cab_company_name') or 'Unknown'
+        grouped[company]['bookings'] += 1
+        grouped[company]['people'].append(booking.get('number_of_people'))
+
+    for allocation in allocations:
+        company = allocation.get('cab_company_name') or 'Unknown'
+        grouped[company]['eta'].append(allocation.get('estimated_arrival_to_pickup_min'))
+        grouped[company]['distance'].append(allocation.get('distance_to_pickup_km'))
+
+    rows = []
+    for company, data in grouped.items():
+        rows.append({
+            'cab_company_name': company,
+            'total_bookings': data['bookings'],
+            'avg_eta_min': round(average(data['eta']), 2),
+            'avg_distance_to_pickup_km': round(average(data['distance']), 2),
+            'avg_group_size': round(average(data['people']), 2),
+        })
+    rows.sort(key=lambda r: (-r['total_bookings'], r['cab_company_name']))
+    return rows
+
 def zone_fallback_coordinates():
     return {
         'Castlemaine St Pickup Zone': (-27.46392, 153.00872),
@@ -87,7 +283,7 @@ def zone_fallback_coordinates():
 
 def coordinates_from_bookings():
     grouped = defaultdict(lambda: {'lat': [], 'lng': []})
-    for r in read_csv('bookings.csv'):
+    for r in get_bookings():
         zone = r.get('pickup_location_name')
         lat = num(r.get('pickup_latitude'), None)
         lng = num(r.get('pickup_longitude'), None)
@@ -101,7 +297,7 @@ def coordinates_from_bookings():
     return coords
 
 def pickup_recommendations():
-    summary = read_csv('pickup_point_summary.csv')
+    summary = pickup_point_summary_rows()
     booking_coords = coordinates_from_bookings()
     fallback = zone_fallback_coordinates()
     out = []
@@ -134,11 +330,11 @@ def pickup_recommendations():
     return out
 
 def get_summary():
-    bookings = read_csv('bookings.csv')
-    allocations = read_csv('cab_allocations.csv')
+    bookings = get_bookings()
+    allocations = get_allocations()
     pickup_counts = Counter(r.get('pickup_location_name','Unknown') for r in bookings)
     avg_eta = sum(num(r.get('estimated_arrival_to_pickup_min')) for r in allocations) / max(len(allocations), 1)
-    accessible = sum(1 for r in bookings if str(r.get('accessible_vehicle_required','')).lower() in ['true','yes','1'])
+    accessible = sum(1 for r in bookings if truthy(r.get('accessible_vehicle_required')))
     top = pickup_counts.most_common(1)[0][0] if pickup_counts else 'No data'
     return {
         'total_bookings': len(bookings), 'active_cabs': len(allocations), 'avg_eta': round(avg_eta, 1),
@@ -146,7 +342,7 @@ def get_summary():
     }
 
 def cab_markers(limit=120):
-    rows = read_csv('cab_allocations.csv', limit)
+    rows = get_allocations(limit)
     markers = []
     for r in rows:
         lat = num(r.get('cab_current_latitude'), None)
@@ -162,13 +358,69 @@ def cab_markers(limit=120):
             })
     return markers
 
+def build_booking_from_request(payload, email):
+    now = datetime.now()
+    booking_id = 'BK' + now.strftime('%m%d') + uuid4().hex[:6].upper()
+    pickup_zone = payload.get('zone') or payload.get('pickup') or 'Suncorp Stadium Pickup'
+    pickup_label = payload.get('pickup') or pickup_zone
+    destination = payload.get('destination') or 'Destination not set'
+    lat = payload.get('lat') or ''
+    lng = payload.get('lng') or ''
+
+    return {
+        'customer_id': email,
+        'booking_id': booking_id,
+        'pickup_date': now.strftime('%Y-%m-%d'),
+        'pickup_time': now.strftime('%I:%M %p'),
+        'pickup_location_name': pickup_zone,
+        'pickup_latitude': str(lat),
+        'pickup_longitude': str(lng),
+        'dropoff_suburb': destination,
+        'dropoff_latitude': '',
+        'dropoff_longitude': '',
+        'number_of_people': str(payload.get('number_of_people') or 1),
+        'kids_under_5': str(payload.get('kids_under_5') or 0),
+        'count_kids_under_5': str(payload.get('count_kids_under_5') or 0),
+        'accessible_vehicle_required': str(payload.get('accessible_vehicle_required') or 0),
+        'special_requirements': payload.get('special_requirements') or 'None',
+        'booking_channel': 'CrowdCab Web',
+        'payment_method': payload.get('payment_method') or 'Not selected',
+        'cab_company_name': payload.get('cab_company_name') or 'Pending allocation',
+        'cab_company_id': payload.get('cab_company_id') or '',
+        'pickup_time_parsed': now.strftime('%H:%M:%S'),
+        'pickup_datetime': now.strftime('%Y-%m-%d %H:%M:%S'),
+        'created_by_email': email,
+        'destination': destination,
+        'confirmed_pickup_label': pickup_label,
+        'confirmed_walk_min': str(payload.get('walk_min') or ''),
+        'confirmed_eta_min': str(payload.get('eta') or ''),
+        'confirmed_crowd': payload.get('crowd') or '',
+        'confirmed_at': now.strftime('%Y-%m-%d %H:%M:%S'),
+        'booking_status': 'Confirmed',
+    }
+
+def trip_from_booking(row):
+    return {
+        'booking_id': row.get('booking_id'),
+        'pickup': row.get('confirmed_pickup_label') or row.get('pickup_location_name'),
+        'zone': row.get('pickup_location_name'),
+        'lat': num(row.get('pickup_latitude'), None),
+        'lng': num(row.get('pickup_longitude'), None),
+        'walk_min': num(row.get('confirmed_walk_min')),
+        'eta': num(row.get('confirmed_eta_min')),
+        'crowd': row.get('confirmed_crowd') or 'Confirmed',
+        'destination': row.get('destination') or row.get('dropoff_suburb'),
+        'confirmed_at': row.get('confirmed_at') or row.get('pickup_datetime'),
+        'status': row.get('booking_status') or 'Confirmed',
+    }
+
 def dashboard_payload(kind):
-    bookings = read_csv('bookings.csv')
-    allocations = read_csv('cab_allocations.csv')
-    pickup_summary = read_csv('pickup_point_summary.csv')
-    companies = read_csv('cab_company_summary.csv')
-    congestion = read_csv('congestion_points.csv')
-    roads = read_csv('road_network_points.csv', 1600)
+    bookings = get_bookings()
+    allocations = get_allocations()
+    pickup_summary = pickup_point_summary_rows(bookings, allocations)
+    companies = cab_company_summary_rows(bookings, allocations)
+    congestion = get_congestion_points()
+    roads = get_road_network_points(1600)
     summary = get_summary()
 
     def table(rows, columns, limit=32):
@@ -194,7 +446,8 @@ def dashboard_payload(kind):
     if kind == 'pickups':
         recs = pickup_recommendations()
         access_total = sum(int(num(r.get('accessible_bookings'))) for r in pickup_summary)
-        top_zone = recs[0]['zone'] if recs else 'No data'
+        top_pickup = max(pickup_summary, key=lambda r: int(num(r.get('total_bookings'))), default=None)
+        top_zone = top_pickup.get('pickup_location_name') if top_pickup else 'No data'
         return {
             'kpis': [
                 {'label': 'Pickup zones', 'value': len(pickup_summary)},
@@ -209,8 +462,8 @@ def dashboard_payload(kind):
 
     if kind == 'congestion':
         by_type = Counter(r.get('element_type','Unknown') for r in congestion)
-        by_signal = Counter('Traffic signals' if str(r.get('traffic_signals','')).lower() in ['true','yes','1'] else 'Other congestion points' for r in congestion)
-        high = sum(1 for r in congestion if str(r.get('traffic_signals','')).lower() in ['true','yes','1'])
+        by_signal = Counter('Traffic signals' if truthy(r.get('traffic_signals')) else 'Other congestion points' for r in congestion)
+        high = sum(1 for r in congestion if truthy(r.get('traffic_signals')))
         crossings = sum(1 for r in congestion if r.get('crossing'))
         return {
             'kpis': [
@@ -226,16 +479,13 @@ def dashboard_payload(kind):
 
     if kind == 'cabs':
         by_status = Counter(r.get('allocation_status','Unknown') for r in allocations)
-        company_eta = defaultdict(list)
-        for r in allocations:
-            company_eta[r.get('cab_company_name','Unknown')].append(num(r.get('estimated_arrival_to_pickup_min')))
-        avg_by_company = {k: round(sum(v)/max(len(v),1),2) for k,v in company_eta.items()}
+        avg_by_company = {r['cab_company_name']: r['avg_eta_min'] for r in companies}
         return {
             'summary': summary,
             'kpis': [
                 {'label': 'Assigned cabs', 'value': len(allocations)},
                 {'label': 'Avg ETA', 'value': f"{summary['avg_eta']} min"},
-                {'label': 'Companies', 'value': len(avg_by_company)},
+                {'label': 'Companies', 'value': len(companies)},
                 {'label': 'Vehicle types', 'value': len(set(r.get('vehicle_type','Unknown') for r in allocations))},
             ],
             'bar': {'title': 'Average ETA by company', 'x': list(avg_by_company.keys()), 'y': list(avg_by_company.values())},
@@ -245,7 +495,7 @@ def dashboard_payload(kind):
 
     if kind == 'roads':
         by_highway = Counter(r.get('highway','Unknown') for r in roads)
-        by_oneway = Counter('One-way' if str(r.get('oneway','')).lower() in ['yes','true','1'] else 'Two-way / unknown' for r in roads)
+        by_oneway = Counter('One-way' if truthy(r.get('oneway')) else 'Two-way / unknown' for r in roads)
         named = sum(1 for r in roads if r.get('name'))
         return {
             'kpis': [
@@ -271,6 +521,10 @@ def clean(o):
 @app.context_processor
 def inject_user():
     return {'user_role': current_role(), 'user_name': session.get('name'), 'dashboards': DASHBOARDS}
+
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory(os.path.join(app.root_path, 'static'), 'favicon.svg', mimetype='image/svg+xml')
 
 @app.route('/')
 def home(): return render_template('home.html', active='home')
@@ -351,7 +605,112 @@ def api_map_feed():
     quiet = sorted(recs, key=lambda x: (0 if x['crowd']=='easy' else 1 if x['crowd']=='medium' else 2, x['bookings'], x['walk_min']))[:8]
     accessible = sorted(recs, key=lambda x: (-x.get('accessible', 0), x['walk_min'], x['eta']))[:8]
     best = recs[:8]
-    return jsonify({'stadium': STADIUM, 'pickups': recs, 'cabs': cab_markers(), 'best': best, 'fastest': fastest, 'quiet': quiet, 'accessible': accessible})
+    realtime = realtime_status()
+    return jsonify({
+        'stadium': STADIUM,
+        'pickups': recs,
+        'cabs': cab_markers(),
+        'best': best,
+        'fastest': fastest,
+        'quiet': quiet,
+        'accessible': accessible,
+        'realtime': {
+            'enabled': realtime['enabled'],
+            'provider': realtime.get('provider'),
+            'fallback_used': realtime['fallback_used'],
+            'fallback_reason': realtime.get('fallback_reason'),
+            'last_updated': realtime['last_updated'],
+            'source': realtime.get('source'),
+            'sources': realtime.get('sources'),
+        },
+        'traffic_events': realtime['events_near_suncorp'],
+    })
+
+@app.route('/api/recommend-pickups')
+def api_recommend_pickups():
+    priority = request.args.get('priority', 'balanced')
+    if priority not in WEIGHTS:
+        priority = 'balanced'
+    accessibility_required = str(request.args.get('accessibility_required', '')).lower() in ['true', '1', 'yes']
+    max_walk_km = num(request.args.get('max_walk_km'), DEFAULT_MAX_WALK_KM)
+    max_walk_km = min(max(max_walk_km, 0.2), 1.0)
+    user_lat = num(request.args.get('user_lat'), None)
+    user_lng = num(request.args.get('user_lng'), None)
+    selected_pickup = {
+        'label': request.args.get('selected_label') or request.args.get('selected_pickup'),
+        'pickup': request.args.get('selected_label') or request.args.get('selected_pickup'),
+        'zone': request.args.get('selected_zone'),
+        'lat': num(request.args.get('selected_lat'), None),
+        'lng': num(request.args.get('selected_lng'), None),
+    }
+    selected_pickup = {k: v for k, v in selected_pickup.items() if v not in [None, '']}
+
+    recommendations = recommend_pickups(
+        user_lat=user_lat,
+        user_lng=user_lng,
+        preferences={
+            'priority': priority,
+            'accessibility_required': accessibility_required,
+            'max_walk_km': max_walk_km,
+        }
+    )
+    selected_scored = score_selected_pickup(
+        selected_pickup,
+        recommendations,
+        WEIGHTS[priority],
+        accessibility_required
+    ) if selected_pickup else None
+    realtime = realtime_status()
+    return jsonify({
+        'priority': priority,
+        'weights': WEIGHTS[priority],
+        'accessibility_required': accessibility_required,
+        'pickup_filter': {
+            'focus_area': 'Suncorp Stadium',
+            'max_walk_km': max_walk_km,
+            'max_walk_m': round(max_walk_km * 1000),
+            'goal': 'easy cab pickup with customer walk under 1 km',
+        },
+        'realtime': {
+            'enabled': realtime['enabled'],
+            'provider': realtime.get('provider'),
+            'fallback_used': realtime['fallback_used'],
+            'fallback_reason': realtime.get('fallback_reason'),
+            'last_updated': realtime['last_updated'],
+            'source': realtime.get('source'),
+            'sources': realtime.get('sources'),
+        },
+        'selected_pickup': selected_scored,
+        'recommended_pickup': recommendations[0] if recommendations else None,
+        'best': recommendations[0] if recommendations else None,
+        'alternatives': recommendations[1:4],
+        'recommendations': recommendations,
+    })
+
+@app.route('/api/realtime-traffic')
+def api_realtime_traffic():
+    return jsonify(realtime_status())
+
+@app.route('/api/bookings', methods=['POST'])
+def api_create_booking():
+    email = session.get('email')
+    if not email:
+        return jsonify({'error': 'Sign in before confirming a pickup.'}), 401
+
+    payload = request.get_json(silent=True) or {}
+    if not payload.get('zone') and not payload.get('pickup'):
+        return jsonify({'error': 'Pickup zone is required.'}), 400
+
+    booking = build_booking_from_request(payload, email)
+    insert_booking(booking)
+    return jsonify({'booking': trip_from_booking(booking)}), 201
+
+@app.route('/api/my-trips')
+def api_my_trips():
+    email = session.get('email')
+    if not email:
+        return jsonify({'trips': []})
+    return jsonify({'trips': [trip_from_booking(row) for row in get_customer_bookings(email)]})
 
 @app.route('/api/dashboard/<kind>')
 @internal_required
@@ -359,24 +718,46 @@ def api_dash(kind): return jsonify(clean(dashboard_payload(kind)))
 
 @app.route('/api/allocations')
 @internal_required
-def api_allocations(): return jsonify({'rows': read_csv('cab_allocations.csv', 80), 'summary': dashboard_payload('cabs')})
+def api_allocations(): return jsonify({'rows': get_allocations(80), 'summary': dashboard_payload('cabs')})
 
 @app.route('/api/system')
 @internal_required
 def api_system():
+    ensure_operational_tables()
     files=[]
     for f in os.listdir(DATA_DIR):
         if f.endswith('.csv'):
             rows=read_csv(f)
-            files.append({'file':f,'rows':len(rows),'columns':list(rows[0].keys())[:10] if rows else []})
+            source = 'seed data' if f in ['bookings.csv', 'cab_allocations.csv'] else 'csv reference data'
+            files.append({'file':f,'rows':len(rows),'columns':list(rows[0].keys())[:10] if rows else [], 'source': source})
+    with db_connection() as conn:
+        for table_name in ['bookings', 'cab_allocations']:
+            rows = conn.execute(f'SELECT COUNT(*) FROM {quote_identifier(table_name)}').fetchone()[0]
+            columns = [r['name'] for r in conn.execute(f'PRAGMA table_info({quote_identifier(table_name)})').fetchall()]
+            files.append({'file': table_name, 'rows': rows, 'columns': columns[:10], 'source': 'sqlite operational table'})
+    files.extend([
+        {
+            'file': 'pickup_point_summary',
+            'rows': len(pickup_point_summary_rows()),
+            'columns': ['pickup_location_name','total_bookings','avg_people_per_booking','avg_distance_to_pickup_km','avg_eta_min','accessible_bookings','bookings_with_kids'],
+            'source': 'derived live from bookings + allocations',
+        },
+        {
+            'file': 'cab_company_summary',
+            'rows': len(cab_company_summary_rows()),
+            'columns': ['cab_company_name','total_bookings','avg_eta_min','avg_distance_to_pickup_km','avg_group_size'],
+            'source': 'derived live from bookings + allocations',
+        },
+    ])
     endpoints = [
         {'path':'/api/map-feed','purpose':'Customer pickup map and recommendations'},
+        {'path':'/api/recommend-pickups','purpose':'Scored pickup guidance engine'},
         {'path':'/api/summary','purpose':'Top-level booking and fleet metrics'},
         {'path':'/api/dashboard/<kind>','purpose':'Role-gated internal dashboard data'},
         {'path':'/api/allocations','purpose':'Dispatcher allocation records'},
         {'path':'/api/system','purpose':'Dataset and API health check'},
     ]
-    return jsonify({'files':files, 'endpoints': endpoints, 'flow':['CSV datasets','Flask processing','JSON API','Customer map + internal tools'], 'roles':['customer','admin','developer']})
+    return jsonify({'files':files, 'endpoints': endpoints, 'flow':['Data providers','Derived live summaries','Flask JSON API','Customer map + internal tools'], 'roles':['customer','admin','developer']})
 
 if __name__ == '__main__':
     app.run(debug=True)
