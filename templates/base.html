@@ -30,8 +30,7 @@
         <span class="role-chip">{{ user_role }}</span>
         <a class="auth-btn" href="{{ url_for('logout') }}">Logout</a>
       {% else %}
-        <a class="ghost-link" href="{{ url_for('signin') }}">Sign in</a>
-        <a class="auth-btn" href="{{ url_for('signup') }}">Sign up</a>
+        <a class="auth-btn" href="{{ url_for('login') }}">Login</a>
       {% endif %}
     </div>
   </header>

@@ -101,6 +101,19 @@ TOMTOM_API_KEY=your_tomtom_api_key_here
 
 Traffic keys are optional for local development. If traffic APIs are missing, unavailable, or blocked, the app uses fallback scoring and still runs.
 
+Optional email OTP settings:
+
+```text
+OTP_TTL_MINUTES=10
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=your_email_username
+SMTP_PASSWORD=your_email_password
+SMTP_FROM_EMAIL=no-reply@example.com
+```
+
+If SMTP is not configured, the app runs in local demo mode and shows/logs the OTP so the login flow can still be tested.
+
 6. Start the app.
 
 ```bash
@@ -113,12 +126,12 @@ python app.py
 http://127.0.0.1:5000
 ```
 
-## Demo Logins
+## Authentication
 
 ```text
-Customer:  customer@crowdcab.com / customer123
-Admin:     admin@crowdcab.com / admin123
-Developer: dev@crowdcab.com / dev123
+Customer:  any valid email + OTP
+Admin:     admin@crowdcab.com, no OTP required
+Developer: dev@crowdcab.com, no OTP required
 ```
 
 ## Data Notes

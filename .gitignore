@@ -27,6 +27,8 @@ data/*.sqlite3
 *.bak
 *.bak.py
 *.zip
+docx_tmp/
+progress_report_render/
 
 # OS/editor files
 .DS_Store

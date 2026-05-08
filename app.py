@@ -1,7 +1,8 @@
 from flask import Flask, render_template, jsonify, request, redirect, url_for, session, flash, send_from_directory
-import csv, os, math, json, sqlite3
+import csv, os, math, json, sqlite3, random, smtplib
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
+from email.message import EmailMessage
 from functools import wraps
 from uuid import uuid4
 from recommendation_engine import DEFAULT_MAX_WALK_KM, WEIGHTS, recommend_pickups, score_selected_pickup
@@ -25,11 +26,12 @@ BOOKING_EXTRA_COLUMNS = {
     'booking_status': 'TEXT',
 }
 
-DEMO_USERS = {
-    'customer@crowdcab.com': {'name': 'Demo Customer', 'password': 'customer123', 'role': 'customer'},
-    'admin@crowdcab.com': {'name': 'Admin User', 'password': 'admin123', 'role': 'admin'},
-    'dev@crowdcab.com': {'name': 'Developer User', 'password': 'dev123', 'role': 'developer'},
+STAFF_USERS = {
+    'admin@crowdcab.com': {'name': 'Admin User', 'role': 'admin'},
+    'dev@crowdcab.com': {'name': 'Developer User', 'role': 'developer'},
 }
+
+OTP_TTL_MINUTES = int(os.getenv('OTP_TTL_MINUTES', '10'))
 
 DASHBOARDS = {
     'bookings': {'title': 'Booking Overview', 'question': 'How busy is the system?', 'short': 'Bookings, channels and peak movement.', 'icon': '●', 'style': 'pulse'},
@@ -48,9 +50,95 @@ def internal_required(fn):
     def wrapper(*args, **kwargs):
         if current_role() not in ['admin', 'developer']:
             flash('Internal pages require admin or developer access.')
-            return redirect(url_for('signin', next=request.path))
+            return redirect(url_for('login', next=request.path))
         return fn(*args, **kwargs)
     return wrapper
+
+def display_name_from_email(email):
+    local = email.split('@', 1)[0].replace('.', ' ').replace('_', ' ').replace('-', ' ')
+    return local.title() or 'CrowdCab Rider'
+
+def login_user(email, name, role):
+    session.pop('pending_auth', None)
+    session['email'] = email
+    session['name'] = name
+    session['role'] = role
+
+def otp_expiry():
+    return datetime.utcnow() + timedelta(minutes=OTP_TTL_MINUTES)
+
+def generate_otp():
+    return f'{random.SystemRandom().randint(0, 999999):06d}'
+
+def send_otp_email(email, otp):
+    """Send an OTP when SMTP is configured; otherwise log it for local demo use."""
+    subject = 'Your CrowdCab login code'
+    body = (
+        f'Your CrowdCab login code is {otp}.\n\n'
+        f'This code expires in {OTP_TTL_MINUTES} minutes. '
+        'If you did not request it, you can ignore this email.'
+    )
+    smtp_host = os.getenv('SMTP_HOST', '').strip()
+    smtp_port = int(os.getenv('SMTP_PORT', '587'))
+    smtp_user = os.getenv('SMTP_USERNAME', '').strip()
+    smtp_password = os.getenv('SMTP_PASSWORD', '').strip()
+    if 'gmail.com' in smtp_host.lower():
+        smtp_password = smtp_password.replace(' ', '')
+    smtp_from = os.getenv('SMTP_FROM_EMAIL', smtp_user or 'no-reply@crowdcab.local').strip()
+    if not smtp_host or not smtp_user or not smtp_password:
+        app.logger.info('CrowdCab OTP for %s: %s', email, otp)
+        return False
+    message = EmailMessage()
+    message['Subject'] = subject
+    message['From'] = smtp_from
+    message['To'] = email
+    message.set_content(body)
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as smtp:
+        smtp.starttls()
+        smtp.login(smtp_user, smtp_password)
+        smtp.send_message(message)
+    return True
+
+def start_customer_otp(email):
+    otp = generate_otp()
+    session['pending_auth'] = {
+        'email': email,
+        'otp': otp,
+        'expires_at': otp_expiry().isoformat(),
+    }
+    try:
+        sent = send_otp_email(email, otp)
+    except Exception as exc:
+        app.logger.warning('CrowdCab OTP email failed for %s: %s', email, exc)
+        sent = False
+    if sent:
+        flash('We sent a 6-digit CrowdCab code to your email.')
+    elif os.getenv('SMTP_HOST', '').strip():
+        flash(f'Email sending failed, so demo fallback is active. Use OTP {otp}.')
+    else:
+        flash(f'Demo mode: use OTP {otp}. Configure SMTP in .env to send real email.')
+
+def verify_customer_otp(otp):
+    pending = session.get('pending_auth') or {}
+    email = pending.get('email')
+    expected = pending.get('otp')
+    expires_at = pending.get('expires_at')
+    if not email or not expected or not expires_at:
+        flash('Please request a new login code.')
+        return False
+    try:
+        expired = datetime.utcnow() > datetime.fromisoformat(expires_at)
+    except ValueError:
+        expired = True
+    if expired:
+        session.pop('pending_auth', None)
+        flash('That code expired. Please request a new one.')
+        return False
+    if otp != expected:
+        flash('That code did not match. Please try again.')
+        return False
+    login_user(email, display_name_from_email(email), 'customer')
+    return True
 
 def read_csv(name, limit=None):
     path = os.path.join(DATA_DIR, name)
@@ -545,26 +633,37 @@ def my_trips(): return render_template('my_trips.html', active='trips')
 def guidance(): return render_template('guidance.html', active='trips')
 
 # ---------- Auth routes ----------
-@app.route('/signin', methods=['GET','POST'])
-def signin():
+@app.route('/login', methods=['GET','POST'])
+def login():
+    next_url = request.args.get('next')
     if request.method == 'POST':
-        email = request.form.get('email','').strip().lower()
-        password = request.form.get('password','')
-        user = DEMO_USERS.get(email)
-        if user and user['password'] == password:
-            session['email'] = email; session['name'] = user['name']; session['role'] = user['role']
-            return redirect(request.args.get('next') or (url_for('internal_home') if user['role'] in ['admin','developer'] else url_for('map_page')))
-        flash('Use one of the demo logins shown below.')
-    return render_template('signin.html', active='signin')
+        action = request.form.get('action', 'request_otp')
+        pending_email = (session.get('pending_auth') or {}).get('email', '')
+        email = (request.form.get('email') or pending_email).strip().lower()
+        if action == 'verify_otp':
+            otp = request.form.get('otp','').strip()
+            if verify_customer_otp(otp):
+                return redirect(next_url or url_for('map_page'))
+        elif not email or '@' not in email:
+            flash('Enter a valid email address.')
+        elif email in STAFF_USERS:
+            user = STAFF_USERS[email]
+            login_user(email, user['name'], user['role'])
+            return redirect(next_url or url_for('internal_home'))
+        else:
+            start_customer_otp(email)
+    pending = session.get('pending_auth')
+    return render_template('login.html', active='login', pending_auth=pending)
 
-@app.route('/signup', methods=['GET','POST'])
+@app.route('/signin')
+def signin():
+    next_url = request.args.get('next')
+    return redirect(url_for('login', next=next_url) if next_url else url_for('login'))
+
+@app.route('/signup')
 def signup():
-    if request.method == 'POST':
-        session['email'] = request.form.get('email','customer@crowdcab.com')
-        session['name'] = request.form.get('name','CrowdCab Rider')
-        session['role'] = 'customer'
-        return redirect(url_for('map_page'))
-    return render_template('signup.html', active='signup')
+    next_url = request.args.get('next')
+    return redirect(url_for('login', next=next_url) if next_url else url_for('login'))
 
 @app.route('/logout')
 def logout():
@@ -695,7 +794,7 @@ def api_realtime_traffic():
 def api_create_booking():
     email = session.get('email')
     if not email:
-        return jsonify({'error': 'Sign in before confirming a pickup.'}), 401
+        return jsonify({'error': 'Log in before confirming a pickup.'}), 401
 
     payload = request.get_json(silent=True) or {}
     if not payload.get('zone') and not payload.get('pickup'):

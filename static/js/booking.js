@@ -48,8 +48,8 @@
     }catch(e){
       console.warn('Could not save trip', e);
       if(e.status === 401){
-        if(btn){ btn.textContent = 'Sign in to confirm'; btn.disabled = false; }
-        window.location.href = '/signin?next=/map';
+        if(btn){ btn.textContent = 'Login to confirm'; btn.disabled = false; }
+        window.location.href = '/login?next=/map';
         return;
       }
       try{

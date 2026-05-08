@@ -1,0 +1,34 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="auth-page">
+  <form class="auth-card otp-auth-card" method="post">
+    <p class="eyebrow">Login</p>
+    <h1>Email access.</h1>
+    <p class="auth-copy">Use your email to get a CrowdCab login code. No password needed for customer pickup guidance.</p>
+
+    {% if pending_auth %}
+      <input type="hidden" name="action" value="verify_otp">
+      <div class="otp-target">
+        <span>Code sent to</span>
+        <strong>{{ pending_auth.email }}</strong>
+      </div>
+      <label>6-digit OTP</label>
+      <input name="otp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="123456" autocomplete="one-time-code" autofocus>
+      <button class="primary-btn" type="submit">Verify and continue</button>
+      <button class="secondary-btn" type="submit" name="action" value="request_otp">Send a new code</button>
+    {% else %}
+      <input type="hidden" name="action" value="request_otp">
+      <label>Email</label>
+      <input name="email" type="email" placeholder="you@example.com" autocomplete="email" autofocus>
+      <button class="primary-btn" type="submit">Send login code</button>
+    {% endif %}
+
+    <div class="demo-logins auth-note">
+      <b>Backend access</b>
+      <span>Admin and developer emails do not need OTP.</span>
+      <span>Admin: admin@crowdcab.com</span>
+      <span>Developer: dev@crowdcab.com</span>
+    </div>
+  </form>
+</section>
+{% endblock %}
