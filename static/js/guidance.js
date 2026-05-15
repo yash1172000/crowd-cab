@@ -19,6 +19,14 @@
     recommendedPickup: null,
     routeRequestId: 0
   };
+  const VENUE_STORAGE_KEY = 'crowdcab_selected_venue';
+
+  function tripVenueId(trip){
+    return trip?.venue_id || localStorage.getItem(VENUE_STORAGE_KEY) || 'suncorp_stadium';
+  }
+  function currentVenueName(){
+    return guidance.mapFeed?.venue?.name || guidance.selectedPickup?.venue_name || 'the venue';
+  }
 
   function gpsUserIcon(){
     return L.divIcon({className:'', html:`<div class="gps-user-person"><span>🚶</span></div>`, iconSize:[52,52], iconAnchor:[26,26]});
@@ -87,11 +95,12 @@
     return note || speed ? `<p class="live-traffic-note">${note}${speed}</p>` : '';
   }
   function tripRouteSteps(pickup, routeSteps=null){
+    const venueName = currentVenueName();
     if(routeSteps?.length){
       const usable = routeSteps.filter(step => step.distance > 5 || ['depart', 'arrive'].includes(step?.maneuver?.type));
       if(usable.length){
         return usable.map((step, index) => ({
-          title: index === 0 ? 'Exit Suncorp Stadium' : osrmStepTitle(step),
+          title: index === 0 ? `Exit ${venueName}` : osrmStepTitle(step),
           detail: step.name ? `Follow ${step.name}.` : 'Follow the highlighted walking route.',
           distance: osrmStepDistance(step),
           point: step?.maneuver?.location ? [step.maneuver.location[1], step.maneuver.location[0]] : null
@@ -102,7 +111,7 @@
     const walk = Number(pickup.walk_min || 3);
     const metres = Math.max(180, Math.round(walk * 85));
     return [
-      {title:'Exit Suncorp Stadium', detail:'Use the closest open exit and head towards the stadium forecourt.', distance:'60 m', point:null},
+      {title:`Exit ${venueName}`, detail:'Use the closest open exit and head towards the event pickup route.', distance:'60 m', point:null},
       {title:`Continue towards ${name}`, detail:'Follow the highlighted walking path on the map.', distance:`${Math.max(90, metres-90)} m`, point:null},
       {title:'Arrive at the pickup marker', detail:'Look for the highlighted CrowdCab pickup sign.', distance:'20 m', point:null},
       {title:'Meet your cab', detail:`Your cab ETA is about ${pickup.eta || walk} min.`, distance:'arrival', point:null}
@@ -111,6 +120,8 @@
   function pickupFromRecommendation(pickup){
     if(!pickup) return null;
     return {
+      venue_id: pickup.venue_id || guidance.recommendations?.venue_id || tripVenueId(null),
+      venue_name: guidance.mapFeed?.venue?.name || currentVenueName(),
       pickup: pickup.label,
       zone: pickup.label,
       lat: pickup.latitude,
@@ -136,8 +147,16 @@
     if(!insights.length) return '';
     return `<p class="comparison-insight">Better because: ${insights.slice(0,3).join(', ')}.</p>`;
   }
+  function bestAlternativeForSelected(selected, best){
+    const options = [best, ...(guidance.recommendations?.alternatives || [])].filter(Boolean);
+    return options.find(p => !samePickup(selected, {pickup:p.label, zone:p.pickup_point_id})) || null;
+  }
   function recommendationQueryForSelected(trip){
-    const params = new URLSearchParams({priority:'balanced'});
+    const params = new URLSearchParams({priority:'balanced', venue_id:tripVenueId(trip)});
+    if(trip?.origin_lat && trip?.origin_lng){
+      params.set('user_lat', trip.origin_lat);
+      params.set('user_lng', trip.origin_lng);
+    }
     if(trip?.pickup || trip?.label) params.set('selected_label', trip.pickup || trip.label);
     if(trip?.zone) params.set('selected_zone', trip.zone);
     if(trip?.lat) params.set('selected_lat', trip.lat);
@@ -146,18 +165,25 @@
   }
   function enrichSelectedPickup(trip){
     if(!trip) return null;
-    const engineMatch = guidance.recommendations?.selected_pickup || (guidance.recommendations?.recommendations || []).find(p => (
+    const recommendationMatch = (guidance.recommendations?.recommendations || []).find(p => (
       samePickup({pickup:p.label}, trip) || samePickup({pickup:p.pickup_point_id}, trip)
     ));
+    const apiSelected = guidance.recommendations?.selected_pickup;
+    const selectedMatch = apiSelected && (
+      samePickup({pickup:apiSelected.label}, trip) || samePickup({pickup:apiSelected.pickup_point_id}, trip)
+    ) ? apiSelected : null;
+    const engineMatch = recommendationMatch || selectedMatch || trip.scores || null;
     const mapMatch = (guidance.mapFeed?.pickups || []).find(p => p.zone === trip.zone || p.label === trip.pickup);
     return {
       ...trip,
+      venue_id: trip.venue_id || guidance.recommendations?.venue_id || tripVenueId(trip),
+      venue_name: trip.venue_name || guidance.mapFeed?.venue?.name || currentVenueName(),
       lat: Number(trip.lat || mapMatch?.lat || engineMatch?.latitude),
       lng: Number(trip.lng || mapMatch?.lng || engineMatch?.longitude),
       walk_min: Number(trip.walk_min || mapMatch?.walk_min || engineMatch?.walk_min || 3),
       eta: Number(trip.eta || mapMatch?.eta || engineMatch?.walk_min || 8),
       reason: engineMatch?.reason || trip.reason || 'Selected pickup scored with current guidance data.',
-      scores: engineMatch || trip.scores || null,
+      scores: engineMatch,
       crowd: trip.crowd || (mapMatch ? `${customerLabelCrowd(mapMatch.crowd)} crowd` : 'Selected pickup')
     };
   }
@@ -206,7 +232,8 @@
     guidance.routeLayers = [];
     if(guidance.pickupMarker) guidance.map.removeLayer(guidance.pickupMarker);
 
-    const start = [guidance.mapFeed.stadium.lat, guidance.mapFeed.stadium.lng];
+    const venue = guidance.mapFeed.venue || guidance.mapFeed.stadium;
+    const start = selected.origin_lat && selected.origin_lng ? [Number(selected.origin_lat), Number(selected.origin_lng)] : [venue.lat, venue.lng];
     const end = [Number(selected.lat), Number(selected.lng)];
     guidance.routePts = buildWalkingRoute(start, end);
     guidance.routeLayers.push(L.polyline(guidance.routePts, {weight:14, opacity:.22, color:'#001523'}).addTo(guidance.map));
@@ -264,28 +291,6 @@
           ${scoreBadge('Driver access', selectedScores.driver_access_score)}
         </div>
       </div>
-      <div class="recommendation-best">
-        <small>Best recommended pickup</small>
-        <strong>${best.label}</strong>
-        <p>${best.reason}</p>
-        ${liveNote(best)}
-        ${comparisonInsight(selected, best)}
-      </div>
-      <div class="recommendation-alternatives">
-        <small>Top alternatives</small>
-        ${[best, ...(guidance.recommendations.alternatives || [])].map(p=>`
-          <article class="guidance-alt-card">
-            <div class="guidance-alt-main">
-              <strong>${p.label}</strong>
-              <span>${p.walk_min} min walk - score ${p.total_score}</span>
-              ${liveNote(p)}
-            </div>
-            <div class="alternative-actions">
-              <button data-view-pickup="${p.pickup_point_id}">View route</button>
-              <button data-switch-pickup="${p.pickup_point_id}">${p.walk_min < selected.walk_min ? 'Take faster route' : 'Switch'}</button>
-            </div>
-          </article>`).join('')}
-      </div>
     `;
     qsa('[data-view-pickup]', panel).forEach(btn => btn.addEventListener('click', () => viewPickup(btn.dataset.viewPickup)));
     qsa('[data-switch-pickup]', panel).forEach(btn => btn.addEventListener('click', () => switchPickup(btn.dataset.switchPickup)));
@@ -333,9 +338,12 @@
     const storedTrip = loadStoredTrip();
     guidance.recommendations = await getJSON(recommendationQueryForSelected(storedTrip));
     guidance.recommendedPickup = pickupFromRecommendation(guidance.recommendations.recommended_pickup || guidance.recommendations.best);
-    guidance.mapFeed = await getJSON('/api/map-feed');
+    const venueId = guidance.recommendations?.venue_id || tripVenueId(storedTrip);
+    localStorage.setItem(VENUE_STORAGE_KEY, venueId);
+    guidance.mapFeed = await getJSON(`/api/map-feed?venue_id=${encodeURIComponent(venueId)}`);
 
-    guidance.map = L.map(el, {zoomControl:true, attributionControl:true}).setView([guidance.mapFeed.stadium.lat, guidance.mapFeed.stadium.lng], 17);
+    const venue = guidance.mapFeed.venue || guidance.mapFeed.stadium;
+    guidance.map = L.map(el, {zoomControl:true, attributionControl:true}).setView([venue.lat, venue.lng], 17);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19, attribution:'OpenStreetMap'}).addTo(guidance.map);
 
     const selected = storedTrip || guidance.recommendedPickup;

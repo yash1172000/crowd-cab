@@ -25,7 +25,7 @@
     }
 
     if(!trips.length){
-      root.innerHTML = `<div class="empty-state improved-empty"><strong>No pickup plan yet.</strong><span>Choose a pickup from the Live Map to start walking guidance.</span><a class="primary-btn" href="/map">Open Live Map</a></div>`;
+      root.innerHTML = `<div class="empty-state improved-empty"><strong>No pickup plan yet.</strong><span>Choose a pickup from the Live Map to start walking guidance.</span></div>`;
       return;
     }
 
@@ -48,7 +48,6 @@
         <em>${t.confirmed_at || ''}</em>
         <div class="trip-actions">
           <button class="start-guidance-link" data-trip-index="${i}">${featured ? 'Continue walking guidance' : 'Open guidance'}</button>
-          <a href="/map">Choose another pickup</a>
         </div>
       </article>`;
 
@@ -68,8 +67,6 @@
             <span><b>${active.walk_min || '--'}</b> min walk</span>
             <span><b>${active.crowd || 'Ready'}</b> crowd status</span>
           </div>
-          <button class="start-guidance-link aside-guidance-btn" data-trip-index="0">Continue walking guidance</button>
-          <a class="secondary-btn" href="/map">Review live pickup options</a>
         </aside>
       </div>
     `;

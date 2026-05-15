@@ -1,34 +1,74 @@
 {% extends 'base.html' %}
 {% block content %}
 <section class="auth-page">
-  <form class="auth-card otp-auth-card" method="post">
+  <div class="auth-card otp-auth-card">
     <p class="eyebrow">Login</p>
     <h1>Email access.</h1>
     <p class="auth-copy">Use your email to get a CrowdCab login code. No password needed for customer pickup guidance.</p>
 
     {% if pending_auth %}
-      <input type="hidden" name="action" value="verify_otp">
       <div class="otp-target">
         <span>Code sent to</span>
         <strong>{{ pending_auth.email }}</strong>
       </div>
-      <label>6-digit OTP</label>
-      <input name="otp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="123456" autocomplete="one-time-code" autofocus>
-      <button class="primary-btn" type="submit">Verify and continue</button>
-      <button class="secondary-btn" type="submit" name="action" value="request_otp">Send a new code</button>
+      <form class="auth-step-form" method="post">
+        <input type="hidden" name="action" value="verify_otp">
+        <label>6-digit OTP</label>
+        <input name="otp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="123456" autocomplete="one-time-code" required autofocus>
+        <button class="primary-btn" type="submit">Verify and continue</button>
+      </form>
+      <div class="auth-inline-actions">
+        <form method="post">
+          <input type="hidden" name="action" value="resend_otp">
+          <button class="secondary-btn" type="submit">Send a new code</button>
+        </form>
+        <form method="post">
+          <input type="hidden" name="action" value="change_email">
+          <button class="change-email-btn" type="submit">Change email</button>
+        </form>
+      </div>
     {% else %}
-      <input type="hidden" name="action" value="request_otp">
-      <label>Email</label>
-      <input name="email" type="email" placeholder="you@example.com" autocomplete="email" autofocus>
-      <button class="primary-btn" type="submit">Send login code</button>
+      <form class="auth-step-form" method="post">
+        <input type="hidden" name="action" value="request_otp">
+        <label>Email</label>
+        <input id="loginEmailInput" name="email" type="email" placeholder="you@example.com" autocomplete="email" pattern="^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$" title="Please enter a valid public email address." required autofocus>
+        <p class="auth-field-help" id="loginEmailHelp">Use a valid public email such as Gmail, Outlook, Yahoo, iCloud, or Proton.</p>
+        <button class="primary-btn" type="submit">Send login code</button>
+      </form>
     {% endif %}
 
     <div class="demo-logins auth-note">
-      <b>Backend access</b>
-      <span>Admin and developer emails do not need OTP.</span>
-      <span>Admin: admin@crowdcab.com</span>
-      <span>Developer: dev@crowdcab.com</span>
+      <b>Internal demo access</b>
+      <span>These emails bypass OTP for assessment and testing only.</span>
+      <span><strong>Admin demo:</strong> admin@crowdcab.com</span>
+      <span><strong>Developer testing:</strong> dev@crowdcab.com</span>
     </div>
-  </form>
+  </div>
 </section>
+<script>
+  (() => {
+    const input = document.getElementById('loginEmailInput');
+    const help = document.getElementById('loginEmailHelp');
+    if(!input || !help) return;
+    const allowedDomains = new Set([
+      'gmail.com','googlemail.com','outlook.com','hotmail.com','live.com','msn.com',
+      'yahoo.com','yahoo.co.in','icloud.com','me.com','mac.com','proton.me',
+      'protonmail.com','aol.com','zoho.com','mail.com','gmx.com','crowdcab.com'
+    ]);
+    input.form?.addEventListener('submit', event => {
+      const value = input.value.trim().toLowerCase();
+      const domain = value.split('@').pop();
+      if(!input.validity.valid || !allowedDomains.has(domain)){
+        event.preventDefault();
+        help.textContent = 'Please check your email address and enter a valid public email such as Gmail, Outlook, Yahoo, iCloud, or Proton.';
+        help.classList.add('error');
+        input.focus();
+      }
+    });
+    input.addEventListener('input', () => {
+      help.textContent = 'Use a valid public email such as Gmail, Outlook, Yahoo, iCloud, or Proton.';
+      help.classList.remove('error');
+    });
+  })();
+</script>
 {% endblock %}

@@ -1,5 +1,5 @@
 from flask import Flask, render_template, jsonify, request, redirect, url_for, session, flash, send_from_directory
-import csv, os, math, json, sqlite3, random, smtplib
+import csv, os, math, json, sqlite3, random, smtplib, re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from email.message import EmailMessage
@@ -17,6 +17,8 @@ STADIUM = {'name':'Suncorp Stadium', 'lat':-27.4648, 'lng':153.0095}
 
 BOOKING_EXTRA_COLUMNS = {
     'created_by_email': 'TEXT',
+    'venue_id': 'TEXT',
+    'venue_name': 'TEXT',
     'destination': 'TEXT',
     'confirmed_pickup_label': 'TEXT',
     'confirmed_walk_min': 'TEXT',
@@ -27,11 +29,44 @@ BOOKING_EXTRA_COLUMNS = {
 }
 
 STAFF_USERS = {
-    'admin@crowdcab.com': {'name': 'Admin User', 'role': 'admin'},
-    'dev@crowdcab.com': {'name': 'Developer User', 'role': 'developer'},
+    'admin@crowdcab.com': {
+        'name': 'Admin User',
+        'role': 'admin',
+        'purpose': 'Management/demo access for assessors and stakeholders.',
+    },
+    'dev@crowdcab.com': {
+        'name': 'Developer User',
+        'role': 'developer',
+        'purpose': 'Testing/debug access for development checks.',
+    },
 }
 
 OTP_TTL_MINUTES = int(os.getenv('OTP_TTL_MINUTES', '10'))
+EMAIL_RE = re.compile(r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')
+DEFAULT_PUBLIC_EMAIL_DOMAINS = {
+    'gmail.com',
+    'googlemail.com',
+    'outlook.com',
+    'hotmail.com',
+    'live.com',
+    'msn.com',
+    'yahoo.com',
+    'yahoo.co.in',
+    'icloud.com',
+    'me.com',
+    'mac.com',
+    'proton.me',
+    'protonmail.com',
+    'aol.com',
+    'zoho.com',
+    'mail.com',
+    'gmx.com',
+}
+PUBLIC_EMAIL_DOMAINS = {
+    domain.strip().lower()
+    for domain in os.getenv('PUBLIC_EMAIL_DOMAINS', ','.join(sorted(DEFAULT_PUBLIC_EMAIL_DOMAINS))).split(',')
+    if domain.strip()
+}
 
 DASHBOARDS = {
     'bookings': {'title': 'Booking Overview', 'question': 'How busy is the system?', 'short': 'Bookings, channels and peak movement.', 'icon': '●', 'style': 'pulse'},
@@ -54,12 +89,45 @@ def internal_required(fn):
         return fn(*args, **kwargs)
     return wrapper
 
+def login_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not session.get('email'):
+            flash('Log in to plan your pickup guidance.')
+            return redirect(url_for('login', next=request.full_path if request.query_string else request.path))
+        return fn(*args, **kwargs)
+    return wrapper
+
 def display_name_from_email(email):
     local = email.split('@', 1)[0].replace('.', ' ').replace('_', ' ').replace('-', ' ')
     return local.title() or 'CrowdCab Rider'
 
-def login_user(email, name, role):
+def is_valid_email(email):
+    return email_validation_error(email) is None
+
+def email_validation_error(email):
+    cleaned = (email or '').strip().lower()
+    if not cleaned or not EMAIL_RE.fullmatch(cleaned):
+        return 'Please enter a valid email address.'
+    domain = cleaned.rsplit('@', 1)[-1]
+    if cleaned in STAFF_USERS or domain in PUBLIC_EMAIL_DOMAINS:
+        return None
+    return 'Please check your email address. Use a valid public email such as Gmail, Outlook, Yahoo, iCloud, or Proton.'
+
+def clear_pending_auth():
     session.pop('pending_auth', None)
+
+def valid_pending_auth():
+    pending = session.get('pending_auth') or {}
+    email = (pending.get('email') or '').strip().lower()
+    if not is_valid_email(email) or not pending.get('otp') or not pending.get('expires_at'):
+        clear_pending_auth()
+        return None
+    pending['email'] = email
+    return pending
+
+def login_user(email, name, role):
+    clear_pending_auth()
     session['email'] = email
     session['name'] = name
     session['role'] = role
@@ -99,7 +167,7 @@ def send_otp_email(email, otp):
         smtp.send_message(message)
     return True
 
-def start_customer_otp(email):
+def start_customer_otp(email, resend=False):
     otp = generate_otp()
     session['pending_auth'] = {
         'email': email,
@@ -112,14 +180,15 @@ def start_customer_otp(email):
         app.logger.warning('CrowdCab OTP email failed for %s: %s', email, exc)
         sent = False
     if sent:
-        flash('We sent a 6-digit CrowdCab code to your email.')
+        flash('A new code has been sent.' if resend else 'We sent a 6-digit CrowdCab code to your email.')
     elif os.getenv('SMTP_HOST', '').strip():
         flash(f'Email sending failed, so demo fallback is active. Use OTP {otp}.')
     else:
-        flash(f'Demo mode: use OTP {otp}. Configure SMTP in .env to send real email.')
+        prefix = 'A new demo code is ready.' if resend else 'Demo mode:'
+        flash(f'{prefix} Use OTP {otp}. Configure SMTP in .env to send real email.')
 
 def verify_customer_otp(otp):
-    pending = session.get('pending_auth') or {}
+    pending = valid_pending_auth() or {}
     email = pending.get('email')
     expected = pending.get('otp')
     expires_at = pending.get('expires_at')
@@ -161,7 +230,7 @@ def db_connection():
 def quote_identifier(name):
     return '"' + name.replace('"', '""') + '"'
 
-def seed_table_from_csv(table_name, csv_name, primary_key=None):
+def seed_table_from_csv(table_name, csv_name, primary_key=None, replace_existing=False):
     rows = read_csv(csv_name)
     if not rows:
         return
@@ -177,13 +246,70 @@ def seed_table_from_csv(table_name, csv_name, primary_key=None):
     with db_connection() as conn:
         conn.execute(f'CREATE TABLE IF NOT EXISTS {quote_identifier(table_name)} ({", ".join(column_defs)})')
         existing = conn.execute(f'SELECT COUNT(*) FROM {quote_identifier(table_name)}').fetchone()[0]
-        if existing:
+        if existing and not replace_existing:
             return
+        if existing and replace_existing:
+            conn.execute(f'DELETE FROM {quote_identifier(table_name)}')
 
         placeholders = ', '.join(['?'] * len(columns))
         quoted_columns = ', '.join(quote_identifier(c) for c in columns)
         conn.executemany(
             f'INSERT INTO {quote_identifier(table_name)} ({quoted_columns}) VALUES ({placeholders})',
+            [[row.get(column, '') for column in columns] for row in rows]
+        )
+
+def normalised_pickup_id(prefix, index, label):
+    slug = ''.join(ch.lower() if ch.isalnum() else '_' for ch in label).strip('_')
+    slug = '_'.join(part for part in slug.split('_') if part)
+    return f'{prefix}_{index:03d}_{slug[:36] or "pickup"}'
+
+def suncorp_pickup_rows_for_venue_table():
+    rows = []
+    for index, row in enumerate(read_csv('candidate_pickup_points.csv'), start=1):
+        label = row.get('pickup_point_label') or row.get('street') or f'Suncorp Pickup {index}'
+        rows.append({
+            'venue_id': 'suncorp_stadium',
+            'pickup_point_id': normalised_pickup_id('suncorp', index, label),
+            'label': label,
+            'suburb': row.get('suburb', ''),
+            'street': row.get('street', ''),
+            'latitude': row.get('latitude', ''),
+            'longitude': row.get('longitude', ''),
+            'candidate_pickup_point': row.get('candidate_pickup_point', '1'),
+            'source_dataset': row.get('source_dataset', 'candidate_pickup_points'),
+            'official_event_role': 'candidate_pickup',
+            'nearby_road_count': row.get('nearby_road_count', ''),
+            'nearby_major_road_count': row.get('nearby_major_road_count', ''),
+            'nearby_crossing_count': row.get('nearby_crossing_count', ''),
+            'nearby_signal_count': row.get('nearby_signal_count', ''),
+            'access_complexity_score': row.get('access_complexity_score', ''),
+            'distance_to_venue_km': row.get('distance_to_suncorp_km', ''),
+            'complexity_band': row.get('complexity_band', ''),
+            'walk_band': row.get('walk_band', ''),
+            'safety_score': '',
+            'accessibility_score': '',
+            'driver_access_score': '',
+            'base_congestion_score': '',
+            'notes': 'Imported from the original Suncorp candidate pickup dataset.',
+        })
+    return rows
+
+def seed_venue_pickup_points():
+    seed_table_from_csv(
+        'venue_pickup_points',
+        'venue_pickup_points.csv',
+        'pickup_point_id',
+        replace_existing=True
+    )
+    rows = suncorp_pickup_rows_for_venue_table()
+    if not rows:
+        return
+    columns = list(rows[0].keys())
+    quoted_columns = ', '.join(quote_identifier(c) for c in columns)
+    placeholders = ', '.join(['?'] * len(columns))
+    with db_connection() as conn:
+        conn.executemany(
+            f'INSERT OR REPLACE INTO venue_pickup_points ({quoted_columns}) VALUES ({placeholders})',
             [[row.get(column, '') for column in columns] for row in rows]
         )
 
@@ -199,6 +325,8 @@ def ensure_table_columns(table_name, columns):
 
 def ensure_operational_tables():
     os.makedirs(DATA_DIR, exist_ok=True)
+    seed_table_from_csv('venues', 'venues.csv', 'venue_id', replace_existing=True)
+    seed_venue_pickup_points()
     seed_table_from_csv('bookings', 'bookings.csv', 'booking_id')
     seed_table_from_csv('cab_allocations', 'cab_allocations.csv', 'booking_id')
     ensure_table_columns('bookings', BOOKING_EXTRA_COLUMNS)
@@ -251,6 +379,32 @@ def get_allocations(limit=None):
 
 def get_candidate_pickup_points(limit=None):
     return read_csv('candidate_pickup_points.csv', limit)
+
+def get_venues():
+    return read_table('venues')
+
+def get_venue(venue_id='suncorp_stadium'):
+    venues = get_venues()
+    for venue in venues:
+        if venue.get('venue_id') == venue_id:
+            return venue
+    return {
+        'venue_id': 'suncorp_stadium',
+        'name': STADIUM['name'],
+        'short_name': 'Suncorp',
+        'latitude': STADIUM['lat'],
+        'longitude': STADIUM['lng'],
+        'default_radius_km': '1.0',
+    }
+
+def venue_map_anchor(venue):
+    return {
+        'venue_id': venue.get('venue_id', 'suncorp_stadium'),
+        'name': venue.get('name') or 'Suncorp Stadium',
+        'short_name': venue.get('short_name') or venue.get('name') or 'Venue',
+        'lat': num(venue.get('latitude'), STADIUM['lat']),
+        'lng': num(venue.get('longitude'), STADIUM['lng']),
+    }
 
 def get_congestion_points(limit=None):
     return read_csv('congestion_points.csv', limit)
@@ -452,6 +606,8 @@ def build_booking_from_request(payload, email):
     pickup_zone = payload.get('zone') or payload.get('pickup') or 'Suncorp Stadium Pickup'
     pickup_label = payload.get('pickup') or pickup_zone
     destination = payload.get('destination') or 'Destination not set'
+    venue_id = payload.get('venue_id') or 'suncorp_stadium'
+    venue_name = payload.get('venue_name') or get_venue(venue_id).get('name') or 'Suncorp Stadium'
     lat = payload.get('lat') or ''
     lng = payload.get('lng') or ''
 
@@ -478,6 +634,8 @@ def build_booking_from_request(payload, email):
         'pickup_time_parsed': now.strftime('%H:%M:%S'),
         'pickup_datetime': now.strftime('%Y-%m-%d %H:%M:%S'),
         'created_by_email': email,
+        'venue_id': venue_id,
+        'venue_name': venue_name,
         'destination': destination,
         'confirmed_pickup_label': pickup_label,
         'confirmed_walk_min': str(payload.get('walk_min') or ''),
@@ -497,6 +655,8 @@ def trip_from_booking(row):
         'walk_min': num(row.get('confirmed_walk_min')),
         'eta': num(row.get('confirmed_eta_min')),
         'crowd': row.get('confirmed_crowd') or 'Confirmed',
+        'venue_id': row.get('venue_id') or 'suncorp_stadium',
+        'venue_name': row.get('venue_name') or 'Suncorp Stadium',
         'destination': row.get('destination') or row.get('dropoff_suburb'),
         'confirmed_at': row.get('confirmed_at') or row.get('pickup_datetime'),
         'status': row.get('booking_status') or 'Confirmed',
@@ -618,6 +778,7 @@ def favicon():
 def home(): return render_template('home.html', active='home')
 
 @app.route('/map')
+@login_required
 def map_page(): return render_template('map.html', active='map')
 
 @app.route('/how-it-works')
@@ -627,9 +788,11 @@ def how_it_works(): return redirect(url_for('home') + '#how')
 def safety(): return redirect(url_for('home') + '#safety')
 
 @app.route('/my-trips')
+@login_required
 def my_trips(): return render_template('my_trips.html', active='trips')
 
 @app.route('/guidance')
+@login_required
 def guidance(): return render_template('guidance.html', active='trips')
 
 # ---------- Auth routes ----------
@@ -638,21 +801,43 @@ def login():
     next_url = request.args.get('next')
     if request.method == 'POST':
         action = request.form.get('action', 'request_otp')
-        pending_email = (session.get('pending_auth') or {}).get('email', '')
-        email = (request.form.get('email') or pending_email).strip().lower()
+        pending = valid_pending_auth()
+
+        if action == 'change_email':
+            clear_pending_auth()
+            flash('Enter the email address you want to use.')
+            return redirect(url_for('login', next=next_url) if next_url else url_for('login'))
+
         if action == 'verify_otp':
+            if not pending:
+                flash('Please request a new login code.')
+                return redirect(url_for('login', next=next_url) if next_url else url_for('login'))
             otp = request.form.get('otp','').strip()
             if verify_customer_otp(otp):
                 return redirect(next_url or url_for('map_page'))
-        elif not email or '@' not in email:
-            flash('Enter a valid email address.')
-        elif email in STAFF_USERS:
-            user = STAFF_USERS[email]
-            login_user(email, user['name'], user['role'])
-            return redirect(next_url or url_for('internal_home'))
+
+        elif action == 'resend_otp':
+            if not pending:
+                flash('Please enter your email to request a new code.')
+                return redirect(url_for('login', next=next_url) if next_url else url_for('login'))
+            start_customer_otp(pending['email'], resend=True)
+
+        elif action == 'request_otp':
+            email = (request.form.get('email') or '').strip().lower()
+            email_error = email_validation_error(email)
+            if email_error:
+                flash(email_error)
+            elif email in STAFF_USERS:
+                user = STAFF_USERS[email]
+                login_user(email, user['name'], user['role'])
+                return redirect(next_url or url_for('internal_home'))
+            else:
+                start_customer_otp(email)
+
         else:
-            start_customer_otp(email)
-    pending = session.get('pending_auth')
+            flash('Please choose a valid login action.')
+
+    pending = valid_pending_auth()
     return render_template('login.html', active='login', pending_auth=pending)
 
 @app.route('/signin')
@@ -698,15 +883,60 @@ def system(): return render_template('system.html', active='internal')
 def api_summary(): return jsonify(get_summary())
 
 @app.route('/api/map-feed')
+@login_required
 def api_map_feed():
-    recs = pickup_recommendations()
+    ensure_operational_tables()
+    venue_id = request.args.get('venue_id') or 'suncorp_stadium'
+    user_lat = num(request.args.get('user_lat'), None)
+    user_lng = num(request.args.get('user_lng'), None)
+    venue = get_venue(venue_id)
+    venue_anchor = venue_map_anchor(venue)
+    scored = recommend_pickups(
+        venue_id=venue_id,
+        user_lat=user_lat,
+        user_lng=user_lng,
+        preferences={
+            'priority': 'balanced',
+            'max_walk_km': num(venue.get('default_radius_km'), DEFAULT_MAX_WALK_KM),
+            'search_radius_km': 2.0,
+            'result_limit': 'all',
+        }
+    )
+    recs = [
+        {
+            'zone': p.get('pickup_point_id') or p.get('label'),
+            'label': p.get('label'),
+            'lat': p.get('latitude'),
+            'lng': p.get('longitude'),
+            'bookings': 0,
+            'eta': max(4, round(num(p.get('walk_min'), 5) + (3 if num(p.get('congestion_score'), 60) < 50 else 1))),
+            'walk_min': p.get('walk_min'),
+            'accessible': round(num(p.get('accessibility_score'), 0)),
+            'kids': 0,
+            'crowd': 'easy' if num(p.get('congestion_score'), 70) >= 70 else 'medium' if num(p.get('congestion_score'), 70) >= 45 else 'busy',
+            'score': p.get('total_score'),
+            'total_score': p.get('total_score'),
+            'congestion_score': p.get('congestion_score'),
+            'safety_score': p.get('safety_score'),
+            'accessibility_score': p.get('accessibility_score'),
+            'driver_access_score': p.get('driver_access_score'),
+            'nearby_qldtraffic_events_count': p.get('nearby_qldtraffic_events_count', 0),
+            'live_traffic_note': p.get('live_traffic_note'),
+            'reason': p.get('reason'),
+            'why': p.get('reason') or 'balanced route',
+        }
+        for p in scored[:12]
+    ]
     fastest = sorted(recs, key=lambda x: (x['eta'], x['walk_min']))[:8]
     quiet = sorted(recs, key=lambda x: (0 if x['crowd']=='easy' else 1 if x['crowd']=='medium' else 2, x['bookings'], x['walk_min']))[:8]
     accessible = sorted(recs, key=lambda x: (-x.get('accessible', 0), x['walk_min'], x['eta']))[:8]
     best = recs[:8]
-    realtime = realtime_status()
+    realtime = realtime_status(venue_anchor)
     return jsonify({
-        'stadium': STADIUM,
+        'stadium': venue_anchor,
+        'venue': venue_anchor,
+        'user_location': {'lat': user_lat, 'lng': user_lng} if user_lat is not None and user_lng is not None else None,
+        'venues': [venue_map_anchor(item) for item in get_venues()],
         'pickups': recs,
         'cabs': cab_markers(),
         'best': best,
@@ -722,17 +952,24 @@ def api_map_feed():
             'source': realtime.get('source'),
             'sources': realtime.get('sources'),
         },
-        'traffic_events': realtime['events_near_suncorp'],
+        'traffic_events': realtime.get('events_near_venue') or realtime.get('events_near_suncorp') or [],
     })
 
 @app.route('/api/recommend-pickups')
+@login_required
 def api_recommend_pickups():
+    ensure_operational_tables()
     priority = request.args.get('priority', 'balanced')
     if priority not in WEIGHTS:
         priority = 'balanced'
+    venue_id = request.args.get('venue_id') or 'suncorp_stadium'
     accessibility_required = str(request.args.get('accessibility_required', '')).lower() in ['true', '1', 'yes']
     max_walk_km = num(request.args.get('max_walk_km'), DEFAULT_MAX_WALK_KM)
     max_walk_km = min(max(max_walk_km, 0.2), 1.0)
+    search_radius_km = num(request.args.get('search_radius_km'), 2.0)
+    search_radius_km = min(max(search_radius_km, max_walk_km), 2.0)
+    result_limit = int(num(request.args.get('limit'), 8))
+    result_limit = min(max(result_limit, 7), 12)
     user_lat = num(request.args.get('user_lat'), None)
     user_lng = num(request.args.get('user_lng'), None)
     selected_pickup = {
@@ -744,31 +981,44 @@ def api_recommend_pickups():
     }
     selected_pickup = {k: v for k, v in selected_pickup.items() if v not in [None, '']}
 
-    recommendations = recommend_pickups(
+    all_recommendations = recommend_pickups(
+        venue_id=venue_id,
         user_lat=user_lat,
         user_lng=user_lng,
         preferences={
             'priority': priority,
             'accessibility_required': accessibility_required,
             'max_walk_km': max_walk_km,
+            'search_radius_km': search_radius_km,
+            'result_limit': 'all',
         }
     )
+    recommendations = all_recommendations[:result_limit]
+    venue = get_venue(venue_id)
+    venue_anchor = venue_map_anchor(venue)
+    selected_origin_lat = user_lat if user_lat is not None else venue_anchor['lat']
+    selected_origin_lng = user_lng if user_lng is not None else venue_anchor['lng']
     selected_scored = score_selected_pickup(
         selected_pickup,
-        recommendations,
+        all_recommendations,
         WEIGHTS[priority],
-        accessibility_required
+        accessibility_required,
+        origin_lat=selected_origin_lat,
+        origin_lng=selected_origin_lng,
     ) if selected_pickup else None
-    realtime = realtime_status()
+    realtime = realtime_status(venue_anchor)
     return jsonify({
         'priority': priority,
+        'venue_id': venue_id,
         'weights': WEIGHTS[priority],
         'accessibility_required': accessibility_required,
         'pickup_filter': {
-            'focus_area': 'Suncorp Stadium',
+            'focus_area': 'Suncorp Stadium' if venue_id == 'suncorp_stadium' else 'Queensland Tennis Centre',
             'max_walk_km': max_walk_km,
             'max_walk_m': round(max_walk_km * 1000),
-            'goal': 'easy cab pickup with customer walk under 1 km',
+            'search_radius_km': search_radius_km,
+            'result_limit': result_limit,
+            'goal': 'show the best 7-8 pickup options, mostly under 1 km, with fallback points up to 2 km only when useful',
         },
         'realtime': {
             'enabled': realtime['enabled'],
@@ -784,11 +1034,13 @@ def api_recommend_pickups():
         'best': recommendations[0] if recommendations else None,
         'alternatives': recommendations[1:4],
         'recommendations': recommendations,
+        'candidate_pool_count': len(all_recommendations),
     })
 
 @app.route('/api/realtime-traffic')
 def api_realtime_traffic():
-    return jsonify(realtime_status())
+    venue_id = request.args.get('venue_id') or 'suncorp_stadium'
+    return jsonify(realtime_status(venue_map_anchor(get_venue(venue_id))))
 
 @app.route('/api/bookings', methods=['POST'])
 def api_create_booking():
@@ -805,11 +1057,9 @@ def api_create_booking():
     return jsonify({'booking': trip_from_booking(booking)}), 201
 
 @app.route('/api/my-trips')
+@login_required
 def api_my_trips():
-    email = session.get('email')
-    if not email:
-        return jsonify({'trips': []})
-    return jsonify({'trips': [trip_from_booking(row) for row in get_customer_bookings(email)]})
+    return jsonify({'trips': [trip_from_booking(row) for row in get_customer_bookings(session.get('email'))]})
 
 @app.route('/api/dashboard/<kind>')
 @internal_required
@@ -830,10 +1080,11 @@ def api_system():
             source = 'seed data' if f in ['bookings.csv', 'cab_allocations.csv'] else 'csv reference data'
             files.append({'file':f,'rows':len(rows),'columns':list(rows[0].keys())[:10] if rows else [], 'source': source})
     with db_connection() as conn:
-        for table_name in ['bookings', 'cab_allocations']:
+        for table_name in ['venues', 'venue_pickup_points', 'bookings', 'cab_allocations']:
             rows = conn.execute(f'SELECT COUNT(*) FROM {quote_identifier(table_name)}').fetchone()[0]
             columns = [r['name'] for r in conn.execute(f'PRAGMA table_info({quote_identifier(table_name)})').fetchall()]
-            files.append({'file': table_name, 'rows': rows, 'columns': columns[:10], 'source': 'sqlite operational table'})
+            source = 'sqlite reference table' if table_name in ['venues', 'venue_pickup_points'] else 'sqlite operational table'
+            files.append({'file': table_name, 'rows': rows, 'columns': columns[:10], 'source': source})
     files.extend([
         {
             'file': 'pickup_point_summary',

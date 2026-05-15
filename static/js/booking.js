@@ -10,13 +10,17 @@
   }
 
   function finalDestinationValue(){
-    return (qs('#destinationInput')?.value || '').trim() || 'Destination not set';
+    return (qs('#destinationInput')?.value || '').trim() || C.getStoredDestination?.() || 'Destination not set';
   }
 
   function finalTripFromSelected(){
     const selectedZone = window.CrowdCabMap?.getSelectedZone();
+    const selectedVenue = window.CrowdCabMap?.getSelectedVenue?.();
+    const userLocation = window.CrowdCabMap?.getUserLocation?.();
     if(!selectedZone) return null;
     return {
+      venue_id: selectedVenue?.venue_id || window.CrowdCabMap?.getSelectedVenueId?.() || 'suncorp_stadium',
+      venue_name: selectedVenue?.name || 'Suncorp Stadium',
       pickup: selectedZone.label || selectedZone.zone,
       zone: selectedZone.zone,
       lat: selectedZone.lat,
@@ -27,6 +31,9 @@
       reason: selectedZone.reason || selectedZone.live_traffic_note,
       scores: selectedZone,
       destination: finalDestinationValue(),
+      origin_lat: userLocation?.lat || null,
+      origin_lng: userLocation?.lng || null,
+      origin_label: userLocation ? 'My location' : selectedVenue?.name || 'Event venue',
       confirmed_at: new Date().toLocaleString()
     };
   }
@@ -40,7 +47,7 @@
     let savedTrip = trip;
     try{
       const saved = await postJSON('/api/bookings', trip);
-      savedTrip = saved.booking || trip;
+      savedTrip = {...trip, ...(saved.booking || {})};
       const trips = JSON.parse(localStorage.getItem('crowdcab_trips') || '[]');
       trips.unshift(savedTrip);
       localStorage.setItem('crowdcab_trips', JSON.stringify(trips.slice(0,12)));

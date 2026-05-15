@@ -371,49 +371,55 @@ def _event_type(props):
     return "info"
 
 
-def fetch_qldtraffic_events():
+def fetch_qldtraffic_events(center_lat=SUNCORP_LAT, center_lng=SUNCORP_LNG, radius_km=3):
     if _fresh("qldtraffic"):
-        return _cache["qldtraffic"]["data"]
-    url = _qldtraffic_url()
-    payload, error = _request_json(url, "QLDTraffic GeoJSON")
-    features = payload.get("features", []) if isinstance(payload, dict) else []
-    events = []
-    for idx, feature in enumerate(features):
-        props = feature.get("properties") or {}
-        point = _event_point(feature.get("geometry") or {})
-        if not point:
-            continue
-        lat, lng = point
-        if lat is None or lng is None:
-            continue
-        distance = _km_between(SUNCORP_LAT, SUNCORP_LNG, lat, lng)
-        if distance > 3:
-            continue
-        events.append(
-            {
-                "id": str(props.get("id") or props.get("eventId") or idx),
-                "type": _event_type(props),
-                "description": str(
-                    props.get("headline")
-                    or props.get("title")
-                    or props.get("description")
-                    or props.get("eventDescription")
-                    or "Traffic event"
-                ),
-                "latitude": round(lat, 6),
-                "longitude": round(lng, 6),
-                "distance_to_suncorp_km": round(distance, 3),
-                "source": "QLDTraffic GeoJSON",
-            }
-        )
-    _cache["qldtraffic"] = {
-        "timestamp": _now(),
-        "data": events,
-        "fallback_reason": error,
-        "records": len(features),
-        "endpoint_tested": _redacted_qldtraffic_url(),
-    }
-    return events
+        all_events = _cache["qldtraffic"]["data"]
+    else:
+        url = _qldtraffic_url()
+        payload, error = _request_json(url, "QLDTraffic GeoJSON")
+        features = payload.get("features", []) if isinstance(payload, dict) else []
+        all_events = []
+        for idx, feature in enumerate(features):
+            props = feature.get("properties") or {}
+            point = _event_point(feature.get("geometry") or {})
+            if not point:
+                continue
+            lat, lng = point
+            if lat is None or lng is None:
+                continue
+            all_events.append(
+                {
+                    "id": str(props.get("id") or props.get("eventId") or idx),
+                    "type": _event_type(props),
+                    "description": str(
+                        props.get("headline")
+                        or props.get("title")
+                        or props.get("description")
+                        or props.get("eventDescription")
+                        or "Traffic event"
+                    ),
+                    "latitude": round(lat, 6),
+                    "longitude": round(lng, 6),
+                    "source": "QLDTraffic GeoJSON",
+                }
+            )
+        _cache["qldtraffic"] = {
+            "timestamp": _now(),
+            "data": all_events,
+            "fallback_reason": error,
+            "records": len(features),
+            "endpoint_tested": _redacted_qldtraffic_url(),
+        }
+
+    filtered = []
+    for event in all_events:
+        distance = _km_between(center_lat, center_lng, event["latitude"], event["longitude"])
+        if distance <= radius_km:
+            copy = dict(event)
+            copy["distance_to_venue_km"] = round(distance, 3)
+            copy["distance_to_suncorp_km"] = round(_km_between(SUNCORP_LAT, SUNCORP_LNG, event["latitude"], event["longitude"]), 3)
+            filtered.append(copy)
+    return filtered
 
 
 def get_open_data_context_for_pickup(pickup_lat, pickup_lng, radius_m=800):
@@ -428,7 +434,7 @@ def get_open_data_context_for_pickup(pickup_lat, pickup_lng, radius_m=800):
             copy["distance_to_pickup_m"] = round(distance * 1000)
             intersections.append(copy)
     events = []
-    for event in fetch_qldtraffic_events():
+    for event in fetch_qldtraffic_events(lat, lng, radius_km):
         distance = _km_between(lat, lng, event["latitude"], event["longitude"])
         if distance <= radius_km:
             copy = dict(event)
@@ -604,9 +610,13 @@ def calculate_realtime_adjustments(pickup):
     return updated
 
 
-def realtime_status():
+def realtime_status(venue=None):
+    venue = venue or {}
+    venue_lat = _num(venue.get("latitude") or venue.get("lat"), SUNCORP_LAT)
+    venue_lng = _num(venue.get("longitude") or venue.get("lng"), SUNCORP_LNG)
+    venue_name = venue.get("name") or "Suncorp Stadium"
     if REALTIME_PROVIDER == "tomtom":
-        context = _tomtom_context_for_pickup(SUNCORP_LAT, SUNCORP_LNG)
+        context = _tomtom_context_for_pickup(venue_lat, venue_lng)
         return {
             "enabled": bool(ENABLE_REALTIME_TRAFFIC),
             "provider": "tomtom",
@@ -615,11 +625,17 @@ def realtime_status():
             "source": "TomTom Traffic API",
             "last_updated": _iso(_now()),
             "events_near_suncorp": [],
+            "events_near_venue": [],
+            "venue": {"name": venue_name, "latitude": venue_lat, "longitude": venue_lng},
             "count": 0,
         }
 
     intersections = _joined_intersections()
-    events = fetch_qldtraffic_events()
+    events = fetch_qldtraffic_events(venue_lat, venue_lng)
+    near_intersections = [
+        item for item in intersections
+        if _km_between(venue_lat, venue_lng, item["latitude"], item["longitude"]) <= 3
+    ]
     volume_ok = _cache["volume"]["fallback_reason"] is None
     locations_ok = _cache["locations"]["fallback_reason"] is None
     qld_ok = _cache["qldtraffic"]["fallback_reason"] is None
@@ -632,19 +648,24 @@ def realtime_status():
         "sources": OPEN_DATA_SOURCES,
         "source": " / ".join(OPEN_DATA_SOURCES),
         "last_updated": _iso(max(_cache["volume"]["timestamp"], _cache["locations"]["timestamp"], _cache["qldtraffic"]["timestamp"])),
+        "venue": {"name": venue_name, "latitude": venue_lat, "longitude": venue_lng},
         "intersection_volume": {
             "records": _cache["volume"]["records"],
             "joined_locations": _cache["live_intersections"]["joined_locations"],
             "near_suncorp": _cache["live_intersections"]["near_suncorp"],
+            "near_venue": len(near_intersections),
             "volume_source_ok": volume_ok,
             "locations_source_ok": locations_ok,
         },
         "qldtraffic": {
             "events_total": _cache["qldtraffic"]["records"],
-            "events_near_suncorp": len(events),
+            "events_near_suncorp": len(fetch_qldtraffic_events(SUNCORP_LAT, SUNCORP_LNG)),
+            "events_near_venue": len(events),
             "source_ok": qld_ok,
             "endpoint_tested": _cache["qldtraffic"].get("endpoint_tested") or _redacted_qldtraffic_url(),
         },
-        "events_near_suncorp": events,
+        "events_near_suncorp": fetch_qldtraffic_events(SUNCORP_LAT, SUNCORP_LNG),
+        "events_near_venue": events,
+        "events_near_suncorp_or_venue": events,
         "count": len(events),
     }

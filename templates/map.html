@@ -6,12 +6,12 @@
     <div id="liveMap" class="full-live-map"></div>
     <div class="map-legend-card user-map-legend">
       <span><i class="legend stadium"></i>Stadium</span>
+      <span><i class="legend my-location"></i>My location</span>
       <span><i class="legend easy"></i>Less crowded</span>
       <span><i class="legend medium"></i>Moderate</span>
       <span><i class="legend busy"></i>Busy</span>
       <span><i class="legend cab"></i>Cab nearby</span>
       <span><i class="legend traffic-red"></i>Crash/closure</span>
-      <span><i class="legend traffic-orange"></i>Congestion/works</span>
       <span><i class="legend traffic-yellow"></i>Hazard/event</span>
     </div>
   </div>
@@ -25,10 +25,25 @@
       <button type="button" data-step="choose">2 Choose</button>
       <button type="button" data-step="ride">3 Ride</button>
     </div>
+    <div class="planner-explainer" aria-label="How CrowdCab pickup guidance works">
+      <span><b>1</b>Enter your destination.</span>
+      <span><b>2</b>CrowdCab recommends the safest and least crowded pickup point.</span>
+      <span><b>3</b>Follow walking guidance to meet your cab.</span>
+    </div>
 
     <label class="trip-input-block">
-      <small>Pickup</small>
-      <div class="trip-field locked"><i></i><b>Suncorp Stadium</b></div>
+      <small>Pickup venue</small>
+      <div class="venue-picker" id="venuePicker">
+        <button type="button" class="trip-field venue-select-field" id="venuePickerButton" aria-haspopup="listbox" aria-expanded="false">
+          <i></i><span id="venuePickerLabel">Suncorp Stadium</span>
+        </button>
+        <div class="venue-options" id="venueOptions" role="listbox" aria-label="Choose event venue">
+          <button type="button" role="option" class="use-location-option" id="useMyLocationBtn">Use my location</button>
+          <button type="button" role="option" data-venue-id="suncorp_stadium">Suncorp Stadium</button>
+          <button type="button" role="option" data-venue-id="queensland_tennis_centre">Queensland Tennis Centre</button>
+        </div>
+      </div>
+      <span id="myLocationStatus" class="location-status">Optional GPS start point</span>
     </label>
 
     <label class="trip-input-block">
@@ -45,7 +60,7 @@
     <button class="primary-btn" id="recenterMap">Find my pickup</button>
 
     <div id="tripPlannerSummary" class="trip-summary-card hidden">
-      <small>Your exit plan</small>
+      <small>Recommended Pickup Point</small>
       <strong>Pickup loading...</strong>
       <span></span>
     </div>
@@ -62,6 +77,12 @@
       <button class="tab-btn" data-mode="fastest">Fastest</button>
       <button class="tab-btn" data-mode="quiet">Less crowded</button>
       <button class="tab-btn" data-mode="accessible">Accessible</button>
+    </div>
+    <div id="myLocationRideCard" class="my-location-ride-card hidden">
+      <small>My location start</small>
+      <strong>Start from your current location</strong>
+      <span>Pickup choices are ranked from where you are now.</span>
+      <button type="button" id="startFromMyLocationBtn">Start ride with My location</button>
     </div>
     <div id="selectedStrip" class="selected-pickup-card"><strong>Loading pickup...</strong><span></span></div>
     <div id="recommendationList" class="recommendation-list premium-list pickup-options-list"></div>

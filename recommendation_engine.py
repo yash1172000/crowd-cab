@@ -1,13 +1,17 @@
 import csv
 import math
 import os
+import sqlite3
 
 from realtime_traffic import calculate_realtime_adjustments, get_realtime_context_for_pickup
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
+DB_PATH = os.path.join(DATA_DIR, 'crowdcab.sqlite')
 STADIUM = {'lat': -27.4648, 'lng': 153.0095}
 DEFAULT_MAX_WALK_KM = 1.0
+DEFAULT_SEARCH_RADIUS_KM = 2.0
+DEFAULT_RESULT_LIMIT = 8
 MIN_DRIVER_ACCESS_SIGNAL = -30
 MIN_FINAL_DRIVER_ACCESS_SCORE = 15
 
@@ -26,6 +30,28 @@ def read_csv(name):
         return []
     with open(path, newline='', encoding='utf-8-sig') as f:
         return list(csv.DictReader(f))
+
+
+def read_table(table_name):
+    if not os.path.exists(DB_PATH):
+        return []
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        with conn:
+            return [dict(row) for row in conn.execute(f'SELECT * FROM "{table_name}"').fetchall()]
+    except Exception:
+        return []
+
+
+def venue_by_id(venue_id):
+    venue_id = venue_id or 'suncorp_stadium'
+    for venue in read_table('venues'):
+        if venue.get('venue_id') == venue_id:
+            return venue
+    if venue_id == 'suncorp_stadium':
+        return {'venue_id': 'suncorp_stadium', 'name': 'Suncorp Stadium', 'latitude': STADIUM['lat'], 'longitude': STADIUM['lng']}
+    return {'venue_id': venue_id, 'name': venue_id.replace('_', ' ').title(), 'latitude': STADIUM['lat'], 'longitude': STADIUM['lng']}
 
 
 def num(value, default=0):
@@ -149,8 +175,58 @@ def apply_realtime_scoring(result, weights):
     return adjusted
 
 
-def candidate_raw_rows(origin_lat, origin_lng, congestion_points, max_walk_km=DEFAULT_MAX_WALK_KM):
-    candidates = read_csv('candidate_pickup_points.csv')
+def pickup_candidates_for_venue(venue_id):
+    rows = [
+        row for row in read_table('venue_pickup_points')
+        if row.get('venue_id') == venue_id and str(row.get('candidate_pickup_point', '1')) in ['1', 'true', 'True']
+    ]
+    if rows:
+        return rows
+
+    if venue_id != 'suncorp_stadium':
+        return []
+
+    # Compatibility fallback for older databases that have not been seeded yet.
+    fallback = []
+    for index, row in enumerate(read_csv('candidate_pickup_points.csv'), start=1):
+        label = row.get('pickup_point_label') or row.get('street') or f'Suncorp Pickup {index}'
+        fallback.append({
+            'venue_id': 'suncorp_stadium',
+            'pickup_point_id': label,
+            'label': label,
+            'suburb': row.get('suburb', ''),
+            'street': row.get('street', ''),
+            'latitude': row.get('latitude', ''),
+            'longitude': row.get('longitude', ''),
+            'candidate_pickup_point': row.get('candidate_pickup_point', '1'),
+            'source_dataset': row.get('source_dataset', 'candidate_pickup_points'),
+            'official_event_role': 'candidate_pickup',
+            'nearby_road_count': row.get('nearby_road_count', ''),
+            'nearby_major_road_count': row.get('nearby_major_road_count', ''),
+            'nearby_crossing_count': row.get('nearby_crossing_count', ''),
+            'nearby_signal_count': row.get('nearby_signal_count', ''),
+            'access_complexity_score': row.get('access_complexity_score', ''),
+            'distance_to_venue_km': row.get('distance_to_suncorp_km', ''),
+            'complexity_band': row.get('complexity_band', ''),
+            'walk_band': row.get('walk_band', ''),
+        })
+    return fallback
+
+
+def has_blocking_live_closure(row):
+    event_types = {
+        str(event_type).lower()
+        for event_type in (row.get('nearby_qldtraffic_event_types') or row.get('nearby_live_event_types') or [])
+    }
+    if {'closure', 'road_closure'} & event_types:
+        return True
+    if 'roadwork_closure' in event_types and abs((row.get('score_adjustments') or {}).get('driver_access_score', 0)) >= 25:
+        return True
+    return bool(row.get('road_closure'))
+
+
+def candidate_raw_rows(origin_lat, origin_lng, congestion_points, max_walk_km=DEFAULT_MAX_WALK_KM, venue_id='suncorp_stadium', search_radius_km=DEFAULT_SEARCH_RADIUS_KM):
+    candidates = pickup_candidates_for_venue(venue_id)
     raw = []
 
     for row in candidates:
@@ -159,9 +235,9 @@ def candidate_raw_rows(origin_lat, origin_lng, congestion_points, max_walk_km=DE
         if lat is None or lng is None:
             continue
 
-        distance_km = km_between(origin_lat, origin_lng, lat, lng)
-        if origin_lat == STADIUM['lat'] and origin_lng == STADIUM['lng']:
-            distance_km = num(row.get('distance_to_suncorp_km'), distance_km)
+        distance_km = num(row.get('distance_to_venue_km'), None)
+        if distance_km is None:
+            distance_km = km_between(origin_lat, origin_lng, lat, lng)
 
         nearby_roads = num(row.get('nearby_road_count'))
         nearby_major_roads = num(row.get('nearby_major_road_count'))
@@ -170,10 +246,15 @@ def candidate_raw_rows(origin_lat, origin_lng, congestion_points, max_walk_km=DE
         complexity = num(row.get('access_complexity_score'), 150)
         congestion_nearby = nearby_congestion_count(lat, lng, congestion_points)
         driver_access_signal = nearby_roads * 0.45 + nearby_major_roads * 1.2 - complexity * 0.35
-        if distance_km > max_walk_km:
+        if row.get('driver_access_score') not in [None, '']:
+            driver_access_signal = num(row.get('driver_access_score'), driver_access_signal)
+        if distance_km > search_radius_km:
             continue
         if driver_access_signal < MIN_DRIVER_ACCESS_SIGNAL:
             continue
+
+        over_preferred_walk_km = max(0, distance_km - max_walk_km)
+        walk_penalty = over_preferred_walk_km * 1.8
 
         # Pressure values are later inverted: lower pressure means better score.
         raw.append({
@@ -182,12 +263,18 @@ def candidate_raw_rows(origin_lat, origin_lng, congestion_points, max_walk_km=DE
             'lng': lng,
             'distance_km': distance_km,
             'walk_min': max(2, round(distance_km * 12)),
-            'walking_pressure': distance_km,
+            'walking_pressure': distance_km + walk_penalty,
             'congestion_pressure': nearby_signals * 2.5 + nearby_crossings * 0.8 + congestion_nearby * 2.0,
-            'safety_pressure': complexity * 0.55 + nearby_signals * 7 + nearby_crossings * 3,
-            'accessibility_pressure': complexity * 0.75 + distance_km * 80 + nearby_crossings * 2,
+            'safety_pressure': complexity * 0.55 + nearby_signals * 7 + nearby_crossings * 3 + over_preferred_walk_km * 12,
+            'accessibility_pressure': complexity * 0.75 + distance_km * 80 + nearby_crossings * 2 + over_preferred_walk_km * 40,
             'driver_access_signal': driver_access_signal,
             'congestion_nearby': congestion_nearby,
+            'static_scores': {
+                'congestion_score': num(row.get('base_congestion_score'), None),
+                'safety_score': num(row.get('safety_score'), None),
+                'accessibility_score': num(row.get('accessibility_score'), None),
+                'driver_access_score': num(row.get('driver_access_score'), None),
+            },
         })
     return raw
 
@@ -204,11 +291,20 @@ def score_raw_pickups(raw, weights, accessibility_required=False):
 
     results = []
     for item in raw:
+        static_scores = item.get('static_scores') or {}
         walking_score = normalize(item['walking_pressure'], walking_values, invert=True)
-        congestion_score = normalize(item['congestion_pressure'], congestion_values, invert=True)
-        safety_score = normalize(item['safety_pressure'], safety_values, invert=True)
-        accessibility_score = normalize(item['accessibility_pressure'], accessibility_values, invert=True)
-        driver_access_score = normalize(item['driver_access_signal'], driver_values)
+        congestion_score = static_scores.get('congestion_score')
+        if congestion_score is None:
+            congestion_score = normalize(item['congestion_pressure'], congestion_values, invert=True)
+        safety_score = static_scores.get('safety_score')
+        if safety_score is None:
+            safety_score = normalize(item['safety_pressure'], safety_values, invert=True)
+        accessibility_score = static_scores.get('accessibility_score')
+        if accessibility_score is None:
+            accessibility_score = normalize(item['accessibility_pressure'], accessibility_values, invert=True)
+        driver_access_score = static_scores.get('driver_access_score')
+        if driver_access_score is None:
+            driver_access_score = normalize(item['driver_access_signal'], driver_values)
 
         if accessibility_required:
             accessibility_score = clamp(accessibility_score + 8)
@@ -223,9 +319,10 @@ def score_raw_pickups(raw, weights, accessibility_required=False):
         ) / 100
 
         source = item['source']
-        label = source.get('pickup_point_label') or source.get('street') or 'Pickup point'
+        label = source.get('label') or source.get('pickup_point_label') or source.get('street') or 'Pickup point'
         result = {
-            'pickup_point_id': label,
+            'venue_id': source.get('venue_id', 'suncorp_stadium'),
+            'pickup_point_id': source.get('pickup_point_id') or label,
             'label': label,
             'name': label,
             'latitude': round(item['lat'], 6),
@@ -250,8 +347,14 @@ def score_raw_pickups(raw, weights, accessibility_required=False):
             'congestion_nearby': item['congestion_nearby'],
             'suburb': source.get('suburb', ''),
             'street': source.get('street', ''),
+            'source_dataset': source.get('source_dataset', ''),
+            'official_event_role': source.get('official_event_role', ''),
+            'walk_band': source.get('walk_band', ''),
+            'shortlist_status': 'preferred' if item['distance_km'] <= DEFAULT_MAX_WALK_KM else 'fallback',
         }
-        results.append(apply_realtime_scoring(result, weights))
+        adjusted = apply_realtime_scoring(result, weights)
+        if not has_blocking_live_closure(adjusted):
+            results.append(adjusted)
 
     ranked = sorted(results, key=lambda r: r['total_score'], reverse=True)
     deduped = []
@@ -312,7 +415,7 @@ def find_scored_pickup(scored_pickups, selected_pickup):
     return None
 
 
-def score_selected_pickup(selected_pickup, scored_pickups, weights, accessibility_required=False):
+def score_selected_pickup(selected_pickup, scored_pickups, weights, accessibility_required=False, origin_lat=None, origin_lng=None):
     """Score a selected pickup using the same scored candidate set.
 
     If the selected pickup is not one of the named candidate rows, the nearest
@@ -332,22 +435,24 @@ def score_selected_pickup(selected_pickup, scored_pickups, weights, accessibilit
     )
     lat = num(selected_pickup.get('lat') or selected_pickup.get('latitude'), None)
     lng = num(selected_pickup.get('lng') or selected_pickup.get('longitude'), None)
+    origin_lat = num(origin_lat, STADIUM['lat'])
+    origin_lng = num(origin_lng, STADIUM['lng'])
 
     if match:
         result = dict(match)
         if lat is not None and lng is not None:
             result['latitude'] = round(lat, 6)
             result['longitude'] = round(lng, 6)
-            result['distance_km'] = round(km_between(STADIUM['lat'], STADIUM['lng'], lat, lng), 3)
+            result['distance_km'] = round(km_between(origin_lat, origin_lng, lat, lng), 3)
             result['walk_min'] = max(2, round(result['distance_km'] * 12))
         result['pickup_point_id'] = label
         result['label'] = label
         result['name'] = label
         return apply_realtime_scoring(result, weights)
 
-    lat = lat if lat is not None else STADIUM['lat']
-    lng = lng if lng is not None else STADIUM['lng']
-    distance_km = km_between(STADIUM['lat'], STADIUM['lng'], lat, lng)
+    lat = lat if lat is not None else origin_lat
+    lng = lng if lng is not None else origin_lng
+    distance_km = km_between(origin_lat, origin_lng, lat, lng)
     walking_score = clamp(100 - min(distance_km / 1.5, 1) * 100)
     congestion_score = 50
     safety_score = 50
@@ -390,7 +495,7 @@ def score_selected_pickup(selected_pickup, scored_pickups, weights, accessibilit
     return apply_realtime_scoring(result, weights)
 
 
-def recommend_pickups(user_lat=None, user_lng=None, preferences=None):
+def recommend_pickups(venue_id='suncorp_stadium', user_lat=None, user_lng=None, preferences=None):
     """Rank candidate pickup points for event-exit guidance.
 
     Scores are 0-100 where higher is better. Missing live inputs are derived from
@@ -402,9 +507,26 @@ def recommend_pickups(user_lat=None, user_lng=None, preferences=None):
     weights = WEIGHTS.get(priority, WEIGHTS['balanced'])
     accessibility_required = bool(preferences.get('accessibility_required'))
     max_walk_km = num(preferences.get('max_walk_km'), DEFAULT_MAX_WALK_KM)
-    origin_lat = num(user_lat, STADIUM['lat']) if user_lat is not None else STADIUM['lat']
-    origin_lng = num(user_lng, STADIUM['lng']) if user_lng is not None else STADIUM['lng']
+    search_radius_km = num(preferences.get('search_radius_km'), DEFAULT_SEARCH_RADIUS_KM)
+    search_radius_km = min(max(search_radius_km, max_walk_km), 2.0)
+    result_limit = preferences.get('result_limit', DEFAULT_RESULT_LIMIT)
+    venue_id = preferences.get('venue_id') or venue_id or 'suncorp_stadium'
+    venue = venue_by_id(venue_id)
+    venue_lat = num(venue.get('latitude'), STADIUM['lat'])
+    venue_lng = num(venue.get('longitude'), STADIUM['lng'])
+    origin_lat = num(user_lat, venue_lat) if user_lat is not None else venue_lat
+    origin_lng = num(user_lng, venue_lng) if user_lng is not None else venue_lng
 
     congestion_points = read_csv('congestion_points.csv')
-    raw = candidate_raw_rows(origin_lat, origin_lng, congestion_points, max_walk_km=max_walk_km)
-    return score_raw_pickups(raw, weights, accessibility_required)
+    raw = candidate_raw_rows(
+        origin_lat,
+        origin_lng,
+        congestion_points,
+        max_walk_km=max_walk_km,
+        venue_id=venue_id,
+        search_radius_km=search_radius_km,
+    )
+    scored = score_raw_pickups(raw, weights, accessibility_required)
+    if result_limit in [None, '', 0, '0', 'all']:
+        return scored
+    return scored[: int(result_limit)]

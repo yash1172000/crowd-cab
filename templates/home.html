@@ -10,7 +10,7 @@
     <h1>Exit smarter after every event.</h1>
     <p class="hero-line refined">Live pickup zones, cab ETA and safer walking guidance around Suncorp Stadium.</p>
 
-    <form class="premium-ride-card" action="{{ url_for('map_page') }}">
+    <form class="premium-ride-card" id="homePlanForm" action="{{ url_for('map_page') }}">
       <div class="ride-card-head">
         <div>
           <small>Plan your exit</small>
@@ -25,10 +25,11 @@
       </div>
       <div class="route-input destination-input">
         <i></i>
-        <div><small>Destination</small><input placeholder="Enter suburb or address" aria-label="Destination"></div>
+        <div><small>Destination</small><input id="homeDestinationInput" name="destination" placeholder="Enter suburb or address" aria-label="Destination"></div>
       </div>
 
-      <button class="primary-btn large" type="submit">Show my best pickup</button>
+      <p class="home-plan-feedback" id="homePlanFeedback">Enter a destination to see your best pickup.</p>
+      <button class="primary-btn large" id="homePlanSubmit" type="submit" disabled>Show my best pickup</button>
       <div class="ride-card-foot">
         <span>Best zone</span><span>Fastest route</span><span>Lower crowd</span>
       </div>
@@ -66,7 +67,6 @@
       <p class="eyebrow">How it works</p>
       <h2>Three decisions. One clean exit.</h2>
     </div>
-    <a class="secondary-btn" href="{{ url_for('map_page') }}">Open Live Map</a>
   </div>
   <div class="journey-flow">
     <article><b>1</b><strong>Enter destination</strong><span>Start from Suncorp.</span></article>
